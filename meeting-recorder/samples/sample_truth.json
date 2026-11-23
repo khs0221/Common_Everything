@@ -1,0 +1,86 @@
+[
+ {
+  "speaker": "me",
+  "track": "mic",
+  "start": 0.5,
+  "end": 3.426,
+  "text": "Good morning everyone. Thanks for joining the weekly project call."
+ },
+ {
+  "speaker": "guest_a",
+  "track": "loop",
+  "start": 4.026,
+  "end": 7.091,
+  "text": "Good morning. I can hear you clearly. Shall we start with the schedule?"
+ },
+ {
+  "speaker": "me",
+  "track": "mic",
+  "start": 7.691,
+  "end": 10.082,
+  "text": "Yes, please. Where are we with the test plan?"
+ },
+ {
+  "speaker": "guest_a",
+  "track": "loop",
+  "start": 10.682,
+  "end": 14.177,
+  "text": "The test plan is almost finished. I will send the final draft by Thursday."
+ },
+ {
+  "speaker": "guest_b",
+  "track": "loop",
+  "start": 14.777,
+  "end": 18.33,
+  "text": "I have a question about the budget. Do we still need approval from the finance team?"
+ },
+ {
+  "speaker": "guest_b",
+  "track": "loop",
+  "start": 18.68,
+  "end": 20.7,
+  "text": "Last month the approval took almost two weeks."
+ },
+ {
+  "speaker": "me",
+  "track": "mic",
+  "start": 21.3,
+  "end": 24.957,
+  "text": "Good point. I will ask the finance team today and share the answer tomorrow."
+ },
+ {
+  "speaker": "guest_a",
+  "track": "loop",
+  "start": 25.557,
+  "end": 28.401,
+  "text": "Great. Then the next step is the customer workshop in March."
+ },
+ {
+  "speaker": "guest_b",
+  "track": "loop",
+  "start": 29.001,
+  "end": 32.377,
+  "text": "I can prepare the slides for the workshop, but I need the latest numbers first."
+ },
+ {
+  "speaker": "me",
+  "track": "mic",
+  "start": 32.977,
+  "end": 36.483,
+  "text": "Okay. Let's agree that the numbers are shared by Friday. Any other issues?"
+ },
+ {
+  "speaker": "guest_a",
+  "track": "loop",
+  "start": 37.083,
+  "end": 39.196,
+  "text": "No other issues from my side. Thank you."
+ },
+ {
+  "speaker": "guest_b",
+  "track": "loop",
+  "start": 39.796,
+  "end": 41.492,
+  "text": "Nothing else from me. See you next week."
+ }
+]

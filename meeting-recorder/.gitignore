@@ -1,0 +1,15 @@
+# 모델(빌드 때 내려받음)
+models/
+# 녹음·기록 결과물은 저장소에 넣지 않습니다
+회의_*/
+*.wav
+!samples/*.flac
+recordings/
+output/
+# 빌드 산출물
+build/
+dist/
+*.zip
+__pycache__/
+.pytest_cache/
+*.pyc
