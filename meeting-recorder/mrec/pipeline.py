@@ -117,22 +117,26 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         timings["diarize"] = time.monotonic() - t
 
         # 4) 글로 옮기기
-        pr.step(3)
-        t = time.monotonic()
-        tr = Transcriber(beam_size=job.beam_size)
-        timings["load_asr"] = time.monotonic() - t
-        pr.step(4)
-        t = time.monotonic()
-        mic_out = tr.transcribe_file(mic16, mic_segs, job.language, words=True,
-                                     progress=pr.part, cancel=cancel) if mic16 else []
-        timings["asr_mic"] = time.monotonic() - t
-        pr.step(5)
-        t = time.monotonic()
-        loop_out = tr.transcribe_file(loop16, loop_segs, job.language, words=True,
-                                      progress=pr.part, cancel=cancel) if loop16 else []
-        timings["asr_loop"] = time.monotonic() - t
-        del tr
-        gc.collect()
+        mic_out, loop_out = [], []
+        if mic_segs or loop_segs:  # 말소리가 하나도 없으면 모델을 읽지 않습니다
+            pr.step(3)
+            t = time.monotonic()
+            tr = Transcriber(beam_size=job.beam_size)
+            timings["load_asr"] = time.monotonic() - t
+            pr.step(4)
+            t = time.monotonic()
+            if mic16 and mic_segs:
+                mic_out = tr.transcribe_file(mic16, mic_segs, job.language, words=True,
+                                             progress=pr.part, cancel=cancel)
+            timings["asr_mic"] = time.monotonic() - t
+            pr.step(5)
+            t = time.monotonic()
+            if loop16 and loop_segs:
+                loop_out = tr.transcribe_file(loop16, loop_segs, job.language, words=True,
+                                              progress=pr.part, cancel=cancel)
+            timings["asr_loop"] = time.monotonic() - t
+            del tr
+            gc.collect()
 
         # 5) 합치기·쓰기
         pr.step(6)
