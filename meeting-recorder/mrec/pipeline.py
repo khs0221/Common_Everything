@@ -118,6 +118,7 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
 
         # 4) 글로 옮기기
         mic_out, loop_out = [], []
+        lang_stats: dict = {}
         if mic_segs or loop_segs:  # 말소리가 하나도 없으면 모델을 읽지 않습니다
             pr.step(3)
             t = time.monotonic()
@@ -128,12 +129,14 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
             if mic16 and mic_segs:
                 mic_out = tr.transcribe_file(mic16, mic_segs, job.language, words=True,
                                              progress=pr.part, cancel=cancel)
+                lang_stats["mic"] = getattr(tr, "last_lang_stats", {})
             timings["asr_mic"] = time.monotonic() - t
             pr.step(5)
             t = time.monotonic()
             if loop16 and loop_segs:
                 loop_out = tr.transcribe_file(loop16, loop_segs, job.language, words=True,
                                               progress=pr.part, cancel=cancel)
+                lang_stats["loop"] = getattr(tr, "last_lang_stats", {})
             timings["asr_loop"] = time.monotonic() - t
             del tr
             gc.collect()
@@ -148,6 +151,8 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         meta["language"] = job.language or "auto"
         meta["processed_at"] = output.now_iso()
         meta["mode"] = "two_tracks" if (job.mic and job.loop) else "single_file"
+        if lang_stats:
+            meta["language_detection"] = lang_stats  # 트랙별 언어 판별 기술 정보(구간 수·언어별 초)
         names = {}
         if (job.folder / output.RESULT_JSON).is_file():
             try:  # 다시 처리할 때 전에 정한 이름은 번호가 바뀔 수 있어 쓰지 않음('나' 이름만 유지)

@@ -48,7 +48,8 @@ def error_report(where: str, err_text: str) -> str:
         lines += tail or ["(로그 없음)"]
     except OSError:
         lines.append("(로그 없음)")
-    return "\n".join(lines)
+    # 사용자 폴더 경로(C:\\Users\\<이름>)는 가립니다(감사 E1).
+    return sysinfo.mask_user_paths("\n".join(lines))
 
 
 def fmt_elapsed(s: float) -> str:

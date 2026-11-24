@@ -9,6 +9,8 @@ datas = [
     ("samples/sample_mic.flac", "samples"),
     ("samples/sample_loop.flac", "samples"),
     ("samples/sample_truth.json", "samples"),
+    ("samples/sample_mixed_lang.flac", "samples"),
+    ("samples/sample_mixed_lang_truth.json", "samples"),
 ]
 hiddenimports = ["sherpa_onnx", "ctranslate2", "tokenizers"]
 if sys.platform == "win32":

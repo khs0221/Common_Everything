@@ -107,3 +107,10 @@ def test_long_monologue_is_split_into_lines():
     assert " ".join(u.text for u in out) == " ".join(u.text for u in utts)
     many = [Utterance(i * 0.5, i * 0.5 + 0.4, "spk1", "w" * 100) for i in range(20)]  # 글자 수 상한
     assert all(len(u.text) <= 600 for u in join_utterances(many))
+
+
+def test_language_change_starts_new_line():
+    utts = [Utterance(0, 2, "me", "안녕하세요.", "ko"), Utterance(2.3, 4, "me", "Let's start.", "en"),
+            Utterance(4.2, 5, "me", "Okay.", "en")]
+    out = join_utterances(utts)
+    assert [(u.text, u.lang) for u in out] == [("안녕하세요.", "ko"), ("Let's start. Okay.", "en")]

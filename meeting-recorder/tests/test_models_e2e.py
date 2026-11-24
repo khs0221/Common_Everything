@@ -110,3 +110,28 @@ def test_selftest_passes(tmp_path):
     rep = json.loads(out.read_text(encoding="utf-8"))
     assert rc == 0, rep.get("failed_summary")  # 실패하면 어느 항목인지 시험 결과에 바로 보임
     assert rep["ok"] and rep["peak_memory_mb"] > 0 and rep["failed_summary"] == []
+
+
+def test_mixed_language_track_keeps_each_language(samples, tmp_path):
+    """한 트랙 안에서 한국어 → 영어 → 한국어로 바뀌어도, 영어는 영어로·한국어는 한글로 적혀야 합니다(R3).
+    R2 코드에서는 같은 표본에서 영어 발언이 한국어로 번역되거나 빠졌습니다(changes.md R3 재현 기록)."""
+    from mrec import selftest
+
+    folder = tmp_path / "mix"
+    folder.mkdir()
+    shutil.copy(samples / "sample_mixed_lang.flac", folder / "mix.flac")
+    pipeline.run(pipeline.Job(folder, folder / "mix.flac", None, language=None))
+    truth = json.loads((samples / "sample_mixed_lang_truth.json").read_text(encoding="utf-8"))
+    utts, _, _ = output.load_result_json(folder)
+    sc = selftest.score_languages(truth, utts)
+    assert sc["en_as_hangul"] == 0 and sc["ok"] == sc["n"], sc
+    assert {u.lang for u in utts} == {"en", "ko"}
+
+
+def test_fixed_language_skips_detection(samples, tmp_path):
+    """'영어'로 고정하면 언어 판별을 하지 않고 모두 영어로 처리합니다(기존 동작 유지)."""
+    folder = tmp_path / "fixed"
+    folder.mkdir()
+    pipeline.run(pipeline.Job(folder, samples / "sample_mic.flac", None, language="en"))
+    utts, meta, _ = output.load_result_json(folder)
+    assert meta["language"] == "en" and {u.lang for u in utts} == {"en"}
