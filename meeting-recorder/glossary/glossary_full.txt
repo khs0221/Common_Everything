@@ -1,0 +1,315 @@
+# 배터리 모듈 설계·제조·품질 분야의 일반적인 영어 용어집입니다(요약 AI 표기 교정용).
+# 특정 사용자·회사에 한정되지 않은 분야 공통 용어집이며, 자유롭게 고쳐 쓸 수 있습니다.
+
+# 1. 셀·모듈·팩 구조와 부품
+busbar
+end plate
+cooling plate
+cold plate
+compression pad
+gap filler
+TIM
+thermal interface material
+thermal pad
+structural adhesive
+FPCB
+flexible interconnector
+CCS
+cell contacting system
+cell-to-pack
+CTP
+cell-to-module
+CTM
+cell-to-chassis
+CTC
+module-to-pack
+electrode-to-pack
+pouch cell
+prismatic cell
+cylindrical cell
+jelly roll
+cell stack
+tab
+terminal
+cell spacer
+tie rod
+BMS
+CSC
+cell supervision circuit
+thermistor
+NTC
+sense line
+wire harness
+voltage sensing
+temperature sensing
+fuse
+contactor
+busbar insulation
+coolant
+vent
+venting
+pack
+module
+HV connector
+
+# 2. 전기·열·기계 성능과 시험 용어
+SOC
+SOH
+SOHp
+SOP
+DoD
+depth of discharge
+DCIR
+ACIR
+OCV
+C-rate
+CC-CV
+cutoff voltage
+nominal voltage
+internal resistance
+impedance
+EIS
+electrochemical impedance spectroscopy
+capacity
+capacity retention
+energy density
+specific energy
+power density
+cycle life
+calendar life
+coulombic efficiency
+fast charging
+lithium plating
+cell balancing
+thermal runaway
+thermal propagation
+thermal management
+thermal resistance
+thermal conductivity
+thermal ramp
+accelerating rate calorimetry
+swelling
+cell expansion
+preload
+contact resistance
+joint resistance
+peel strength
+pull test
+shear test
+HiPot
+dielectric withstand
+insulation resistance
+vibration test
+mechanical shock
+thermal shock
+drop test
+crush test
+nail penetration
+external short circuit
+overcharge
+over-discharge
+immersion test
+
+# 3. 제조 공정
+laser welding
+ultrasonic welding
+ultrasonic wire bonding
+wire bonding
+resistance welding
+spot welding
+friction stir welding
+laser weld monitoring
+weld penetration
+spatter
+porosity
+dispensing
+adhesive dispensing
+curing
+stacking
+cell stacking
+lamination
+winding
+formation
+aging
+degassing
+sealing
+EOL
+end-of-line test
+leak test
+helium leak test
+X-ray inspection
+AOI
+machine vision
+vision inspection
+thermography
+optical coherence tomography
+OCT
+cell sorting
+cell grading
+cell matching
+torque tightening
+plasma cleaning
+pick and place
+fixture
+tact time
+cycle time
+yield
+FPY
+first pass yield
+OEE
+traceability
+
+# 4. 공정능력·통계적 공정관리
+Cp
+Cpk
+Pp
+Ppk
+process capability
+process performance
+SPC
+control chart
+X-bar R chart
+X-bar S chart
+I-MR chart
+p chart
+histogram
+Pareto chart
+UCL
+LCL
+USL
+LSL
+sigma level
+six sigma
+DPMO
+PPM
+DPPM
+common cause
+special cause
+out of control
+OOC
+OOS
+subgroup
+rational subgroup
+normality test
+Anderson-Darling
+short-term
+long-term
+Western Electric rules
+DOE
+design of experiments
+ANOVA
+MSA
+Gage R&R
+GRR
+repeatability
+reproducibility
+bias
+linearity
+stability
+resolution
+attribute agreement analysis
+ndc
+CMM
+GD&T
+
+# 5. 품질 시스템·기법
+APQP
+PPAP
+PSW
+FMEA
+DFMEA
+PFMEA
+FMEA-MSR
+control plan
+process flow diagram
+PFD
+DVP&R
+RPN
+action priority
+severity
+occurrence
+detection
+8D
+IATF 16949
+ISO 9001
+core tools
+special characteristics
+CTQ
+KPC
+KCC
+poka-yoke
+mistake proofing
+containment
+root cause
+5 Why
+fishbone diagram
+Ishikawa diagram
+corrective action
+preventive action
+CAPA
+NCR
+SCAR
+deviation
+ECN
+change management
+4M change
+run at rate
+FAI
+first article inspection
+golden sample
+layered process audit
+
+# 6. 관련 표준·규정 이름
+UN 38.3
+IEC 62660
+IEC 62660-1
+IEC 62660-2
+IEC 62660-3
+ISO 12405
+ISO 12405-1
+ISO 12405-3
+ISO 12405-4
+UL 2580
+ECE R100
+UNECE R100
+GB 38031
+GB/T 31485
+GB/T 31486
+IEC 62133
+IEC 62619
+UL 1642
+UL 9540A
+SAE J2464
+ISO 26262
+
+# 7. 소재·화학
+NMC
+NCA
+LFP
+LTO
+NMC622
+NMC811
+high-nickel
+cobalt-free
+graphite
+silicon anode
+anode
+cathode
+electrolyte
+separator
+SEI
+CEI
+LiPF6
+additive
+binder
+PVDF
+current collector
+copper foil
+aluminum foil
+active material
+slurry
+dendrite
+solid-state battery
+solid electrolyte
+sodium-ion
+ceramic coating

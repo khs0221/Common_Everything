@@ -1,0 +1,80 @@
+# 배터리 모듈 설계·제조·품질 분야의 일반적인 영어 용어 목록입니다(인식 힌트용, 중요한 것부터).
+# 특정 사용자·회사에 한정되지 않은 분야 공통 용어집이며, 자유롭게 고쳐 쓸 수 있습니다.
+Cpk
+Ppk
+Cp
+Pp
+Gage R&R
+MSA
+SPC
+FMEA
+DFMEA
+PFMEA
+APQP
+PPAP
+PSW
+IATF 16949
+8D
+DCIR
+OCV
+SOC
+SOH
+C-rate
+HiPot
+busbar
+FPCB
+CCS
+TIM
+CTP
+CTM
+NMC
+LFP
+NCA
+UN 38.3
+IEC 62660
+ISO 12405
+UL 2580
+ECE R100
+GB 38031
+EOL
+thermal runaway
+thermal propagation
+gap filler
+cooling plate
+end plate
+compression pad
+pouch cell
+prismatic cell
+laser welding
+ultrasonic wire bonding
+dispensing
+DPMO
+UCL
+LCL
+USL
+LSL
+X-bar R chart
+I-MR chart
+poka-yoke
+CTQ
+KPC
+NCR
+CAPA
+SCAR
+FAI
+OEE
+FPY
+BMS
+NTC
+SEI
+LiPF6
+PVDF
+NMC811
+DOE
+ANOVA
+CMM
+GD&T
+nail penetration
+swelling
+EIS
+ACIR
