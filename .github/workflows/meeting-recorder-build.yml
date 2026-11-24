@@ -75,10 +75,17 @@ jobs:
           $out = Join-Path $PWD "selftest.json"
           $exe = Resolve-Path "dist/MeetingRecorder/MeetingRecorder.exe"
           $p = Start-Process -FilePath $exe -ArgumentList @("--selftest", "--selftest-out", "`"$out`"") -PassThru
-          if (-not $p.WaitForExit(900000)) { $p.Kill(); Write-Error "selftest 15분 초과"; exit 1 }
-          if (Test-Path $out) { Get-Content $out -Encoding utf8 } else { Write-Error "selftest.json 없음" }
-          Write-Host "exit code: $($p.ExitCode)"
-          if ($p.ExitCode -ne 0) { exit 1 }
+          $null = $p.Handle   # 핸들을 잡아 두어야 끝난 뒤 ExitCode 를 읽을 수 있음
+          if (-not $p.WaitForExit(900000)) { $p.Kill(); Write-Host "::error::selftest 15분 초과"; exit 1 }
+          $p.WaitForExit()
+          $code = $p.ExitCode
+          Write-Host "exit code: $code"
+          if (-not (Test-Path $out)) { Write-Host "::error::selftest.json 없음"; exit 1 }
+          Get-Content $out -Encoding utf8
+          $ok = (Get-Content $out -Raw -Encoding utf8 | ConvertFrom-Json).ok
+          # 판정: 결과 파일의 ok 가 true 이고, 종료 코드가 0(또는 읽지 못해 비어 있음)일 때만 성공
+          if ($ok -ne $true) { Write-Host "::error::selftest 실패(ok=$ok)"; exit 1 }
+          if ($null -ne $code -and $code -ne 0) { Write-Host "::error::selftest 종료 코드 $code"; exit 1 }
 
       - name: 크기·구성 확인
         if: always()
@@ -97,6 +104,7 @@ jobs:
             foreach ($bad in @("av", "huggingface_hub", "onnxruntime")) {
               if (Test-Path "$dist/_internal/$bad") { Write-Host "::warning::$bad 가 묶음에 들어 있습니다" }
             }
+            if (Get-ChildItem -Recurse $dist -Filter "cudnn*.dll" -ErrorAction SilentlyContinue) { Write-Host "::warning::cudnn DLL 이 묶음에 들어 있습니다" }
           }
 
       - name: selftest 결과 올리기
