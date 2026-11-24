@@ -1,0 +1,10 @@
+# 프로그램 실행에 필요한 것(빌드 때 설치). 버전을 고정합니다.
+faster-whisper==1.2.1
+ctranslate2==4.9.1
+tokenizers==0.23.3
+sherpa-onnx==2.0.3
+sherpa-onnx-core==2.0.3
+soundfile==0.14.0
+numpy==2.5.5
+soundcard==0.4.6; sys_platform == "win32"
+cffi==2.1.1
