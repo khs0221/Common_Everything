@@ -7,7 +7,7 @@ import numpy as np
 import soundfile as sf
 
 from mrec.devices import FakeBackend, FakeSource, tone
-from mrec.recorder import INFO_FILE, LAG_TOLERANCE_S, AlignedTrack, Recorder
+from mrec.recorder import INFO_FILE, LAG_TOLERANCE_S, STOP_JOIN_S, AlignedTrack, Recorder
 
 SR = 16000
 
@@ -205,7 +205,13 @@ def test_stop_during_stall_is_fast_and_cleans_up(tmp_path):
     src = rec.tracks["loop"].source
     t = time.monotonic()
     res = rec.stop()
-    assert time.monotonic() - t < 0.5
+    took = time.monotonic() - t
+    # '멈춘 읽기를 기다리지 않았다' 를 직접 확인: 읽기 스레드 join 이 시간 초과 없이 끝났어야 함.
+    # (기다렸다면 트랙마다 STOP_JOIN_S 를 다 쓰고 reader_alive_after_stop 이 True 가 됩니다.)
+    assert not res.stats["loop"]["reader_alive_after_stop"] and not res.stats["mic"]["reader_alive_after_stop"]
+    # 시간 기준은 '기다림(트랙당 STOP_JOIN_S)' 과 구별될 만큼만 둡니다. 파일 마무리(fsync)는 부하 걸린
+    # 공용 CI 에서 0.5초를 넘을 수 있어(실측 0.59초) 시간 자체를 빡빡하게 재지 않습니다.
+    assert took < STOP_JOIN_S, took
     assert not rec.tracks["loop"].thread.is_alive() and not rec.tracks["mic"].thread.is_alive()
     assert src._closed.is_set()
     assert sf.info(str(res.loop_path)).frames == sf.info(str(res.mic_path)).frames
