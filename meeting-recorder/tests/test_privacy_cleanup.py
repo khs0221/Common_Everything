@@ -75,3 +75,38 @@ def test_partial_folder_with_other_files_is_kept(tmp_path):
     rec.folder = folder
     rec._remove_partial_folder()
     assert (folder / "메모.txt").is_file()
+
+
+def test_compute_threads_leaves_one_core_and_caps(monkeypatch):
+    monkeypatch.delenv("MREC_THREADS", raising=False)
+    assert sysinfo.compute_threads(1) == 1
+    assert sysinfo.compute_threads(4) == 3
+    assert sysinfo.compute_threads(8) == 7
+    assert sysinfo.compute_threads(32) == sysinfo.MAX_THREADS
+    monkeypatch.setenv("MREC_THREADS", "2")
+    assert sysinfo.compute_threads(8) == 2
+
+
+def test_system_summary_and_session(monkeypatch):
+    monkeypatch.setenv("SESSIONNAME", "RDP-Tcp#3")
+    assert sysinfo.session_kind().startswith("원격 데스크톱")
+    s = sysinfo.system_summary()
+    assert s["cpu_logical"] and s["threads"] >= 1 and (s["memory_total_mb"] or 0) > 0
+
+
+@pytest.mark.gui
+def test_error_report_has_system_and_devices(monkeypatch, tmp_path):
+    from mrec import gui
+
+    monkeypatch.setattr(sysinfo, "log_dir", lambda: tmp_path)
+    text = gui.error_report("시험", "오류", {"mic": "Remote Audio", "loop": "Remote Audio"})
+    assert "CPU 논리 코어" in text and "총 메모리" in text and "세션" in text
+    assert "마이크=Remote Audio" in text
+
+
+def test_recorder_reports_opened_device_names(tmp_path):
+    rec = Recorder(FakeBackend())
+    rec.start(tmp_path, None, None)
+    names = rec.device_names()
+    rec.stop()
+    assert names == {"mic": "fake-mic", "loop": "fake-spk"}

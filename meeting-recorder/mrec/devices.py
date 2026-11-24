@@ -120,6 +120,10 @@ class _SoundcardSource:
 
     def __init__(self, mic_obj):
         self.device_id = getattr(mic_obj, "id", None)
+        try:
+            self.device_name = str(mic_obj.name)  # 진단용(오류 내용 복사)
+        except Exception:
+            self.device_name = None
         last_err = None
         for sr in self.RATES:
             try:

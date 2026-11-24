@@ -23,8 +23,14 @@ log = logging.getLogger("mrec")
 
 LANG_CHOICES = [("자동(영어/한국어)", None), ("영어", "en"), ("한국어", "ko")]
 SPK_CHOICES = [("자동", None)] + [(f"{n}명", n) for n in range(1, 9)]
+# 처리 품질: (화면 이름, 설정 값, whisper 모델)
+QUALITY_CHOICES = [("정확(기본)", "accurate", "turbo"), ("빠름", "fast", "small")]
+# 예상 처리 시간(녹음 길이 대비). 측정 근거: docs/라운드/R4/changes.md. 사용자 PC 는 더 느릴 수 있습니다.
+SPEED_NOTE = {"turbo": "처리 시간: 녹음 길이의 약 {m}배(4코어 기준 측정. 코어가 많으면 더 빠름)",
+              "small": "처리 시간: 녹음 길이의 약 {s}배(정확보다 빠르지만 한국어·용어 정확도가 낮음)"}
 SILENT_WARN_S = 60  # 이 시간 동안 소리가 전혀 없으면 안내
 AUTO_DEVICE = "자동(윈도우에서 쓰는 장치 그대로)"
+SPEED_FACTOR = {"turbo": "0.4", "small": "0.3"}  # 4코어 컨테이너 측정(R4). 8코어 PC 는 더 빠를 수 있음
 LOG_TAIL_LINES = 30
 
 
@@ -35,13 +41,19 @@ def _exc_text(e: BaseException, lines: int = 10) -> str:
     return f"{type(e).__name__}: {e}\n" + "\n".join(tb[-lines:])
 
 
-def error_report(where: str, err_text: str) -> str:
-    """[오류 내용 복사] 에 담는 글: 버전·윈도우 버전·오류·최근 기술 로그(회의 내용 없음)."""
+def error_report(where: str, err_text: str, devices: dict | None = None) -> str:
+    """[오류 내용 복사] 에 담는 글: 버전·윈도우 버전·PC 사양·장치·오류·최근 기술 로그(회의 내용 없음)."""
     from . import __version__
 
+    si = sysinfo.system_summary()
     lines = [f"회의 녹음·기록 {__version__}", f"윈도우/OS: {platform.platform()}",
              f"파이썬: {sys.version.split()[0]}, exe: {bool(getattr(sys, 'frozen', False))}",
-             f"문제: {where}", "", err_text.rstrip(), "", f"최근 로그(최대 {LOG_TAIL_LINES}줄):"]
+             f"CPU 논리 코어: {si['cpu_logical']}, 계산 스레드: {si['threads']}, "
+             f"총 메모리: {si['memory_total_mb']}MB, 세션: {si['session']}"]
+    if devices:
+        lines.append("마지막으로 연 장치: " + ", ".join(f"{('마이크' if k == 'mic' else '스피커')}={v}"
+                                                   for k, v in devices.items()))
+    lines += [f"문제: {where}", "", err_text.rstrip(), "", f"최근 로그(최대 {LOG_TAIL_LINES}줄):"]
     try:
         log_file = sysinfo.log_dir() / "app.log"
         tail = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-LOG_TAIL_LINES:]
@@ -84,6 +96,7 @@ class App:
         self.processing = False
         self.cancel_flag = threading.Event()
         self.silent_since = {"mic": None, "loop": None}
+        self.last_devices: dict = {}
 
         root.title("회의 녹음·기록")
         root.minsize(560, 0)
@@ -152,15 +165,30 @@ class App:
         self.spk_n_cb = ttk.Combobox(f, state="readonly", width=20, values=[n for n, _ in SPK_CHOICES])
         self.spk_n_cb.grid(row=1, column=1, sticky="w", padx=6)
         self.spk_n_cb.current(0)
+        ttk.Label(f, text="처리 품질").grid(row=2, column=0, sticky="w", padx=6, pady=3)
+        self.quality_cb = ttk.Combobox(f, state="readonly", width=20, values=[n for n, _, _ in QUALITY_CHOICES])
+        self.quality_cb.grid(row=2, column=1, sticky="w", padx=6)
+        q = self.settings.get("quality", "accurate")
+        self.quality_cb.current(next((i for i, (_, v, _) in enumerate(QUALITY_CHOICES) if v == q), 0))
+        self.speed_var = tk.StringVar(value="")
+        ttk.Label(f, textvariable=self.speed_var, foreground="#555").grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=6)
+        self.quality_cb.bind("<<ComboboxSelected>>", lambda e: self._update_speed_note())
+        self._update_speed_note()
+        self.glossary_var = tk.StringVar(value="")
+        ttk.Label(f, textvariable=self.glossary_var, foreground="#555", wraplength=420).grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=6)
+        ttk.Button(f, text="용어 파일 열기", command=self.open_glossary).grid(row=4, column=2, padx=6, pady=2)
+        self._update_glossary_note()
         self.auto_var = tk.BooleanVar(value=self.settings.get("auto_process", True))
         ttk.Checkbutton(f, text="녹음을 멈추면 바로 글로 옮기기", variable=self.auto_var).grid(
-            row=2, column=0, columnspan=2, sticky="w", padx=6, pady=3)
+            row=5, column=0, columnspan=2, sticky="w", padx=6, pady=3)
         self.prog = ttk.Progressbar(f, maximum=100, length=300)
-        self.prog.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=4)
+        self.prog.grid(row=6, column=0, columnspan=2, sticky="we", padx=6, pady=4)
         self.cancel_btn = ttk.Button(f, text="처리 취소", command=self.cancel_processing, state="disabled")
-        self.cancel_btn.grid(row=3, column=2, padx=6)
+        self.cancel_btn.grid(row=6, column=2, padx=6)
         self.prog_var = tk.StringVar(value="")
-        ttk.Label(f, textvariable=self.prog_var).grid(row=4, column=0, columnspan=3, sticky="w", padx=6)
+        ttk.Label(f, textvariable=self.prog_var).grid(row=7, column=0, columnspan=3, sticky="w", padx=6)
         f.columnconfigure(1, weight=1)
 
         f = ttk.LabelFrame(self.root, text="4. 결과")
@@ -252,7 +280,7 @@ class App:
 
     def _show_device_error(self, msg: str, where: str, err_text: str):
         self.dev_err.set(msg)
-        self._err_report = error_report(where, err_text)
+        self._err_report = error_report(where, err_text, self.last_devices)
         self.dev_err_label.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=(4, 2))
         self.copy_btn.grid(row=3, column=2, padx=6, pady=(4, 2))
 
@@ -264,7 +292,7 @@ class App:
 
     def copy_error(self):
         """오류 내용(기술 정보)을 클립보드에 넣습니다."""
-        text = self._err_report or error_report("(표시된 오류 없음)", "")
+        text = self._err_report or error_report("(표시된 오류 없음)", "", self.last_devices)
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         self.status.set("오류 내용을 복사했습니다. 메일·메신저에 붙여 넣어 보내 주십시오.")
@@ -317,7 +345,8 @@ class App:
         for w in (self.mic_cb, self.spk_cb, self.reproc_btn, self.file_btn):
             w.configure(state="disabled")
         sr = {k: t.sr for k, t in self.recorder.tracks.items()}
-        log.info("녹음 시작: 표본 주파수 %s", sr)
+        self.last_devices = self.recorder.device_names()
+        log.info("녹음 시작: 표본 주파수 %s, 장치 %s, %s", sr, self.last_devices, sysinfo.system_summary())
         self.status.set(f"녹음 중… 저장 위치: {folder}")
 
     def stop_recording(self):
@@ -369,6 +398,9 @@ class App:
                     self.silent_since[key] = now
                 elif self.silent_since[key] and now - self.silent_since[key] > SILENT_WARN_S:
                     warns.append(f"{label}가 1분 넘게 조용합니다. 장치 선택을 확인해 주십시오.")
+                    if key == "loop":
+                        warns.append("원격(가상) PC 에서는 회의 소리가 이 PC 를 거치지 않고 사용 중인 단말에서 바로 "
+                                     "나올 수 있어, 이 프로그램이 상대방 소리를 녹음하지 못할 수 있습니다.")
             if any(w.startswith("내 마이크") for w in warns):
                 warns.append("윈도우 설정 → 개인 정보 및 보안 → 마이크에서 '데스크톱 앱이 마이크에 "
                              "액세스하도록 허용' 이 켜져 있는지도 확인해 주십시오.")
@@ -403,12 +435,46 @@ class App:
     def _spk_n(self):
         return SPK_CHOICES[max(0, self.spk_n_cb.current())][1]
 
+    def _quality(self) -> tuple[str, str]:
+        """(설정 값, whisper 모델)."""
+        _, value, model = QUALITY_CHOICES[max(0, self.quality_cb.current())]
+        return value, model
+
+    def _update_speed_note(self):
+        _, model = self._quality()
+        self.speed_var.set(SPEED_NOTE[model].format(m=SPEED_FACTOR["turbo"], s=SPEED_FACTOR["small"]))
+
+    def _update_glossary_note(self):
+        try:
+            from . import glossary
+
+            self.glossary_var.set("용어: " + glossary.status_text())
+        except Exception as e:
+            log.warning("용어 파일 확인 실패: %s", type(e).__name__)
+            self.glossary_var.set("용어: 확인하지 못함(용어 없이 처리)")
+
+    def open_glossary(self):
+        from . import glossary
+
+        d = glossary.glossary_dir()
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        open_folder(d)
+
     def _start_job(self, job: pipeline.Job):
         if models.missing_models():
             messagebox.showerror("모델 없음", "모델 파일이 없어 글로 옮길 수 없습니다.\n압축을 다시 풀어 주십시오.")
             return
-        self.settings.update({"language": self._lang(), "auto_process": bool(self.auto_var.get())})
+        quality, model = self._quality()
+        job.model = model  # 다시 처리할 때도 지금 고른 품질을 씀
+        job.mark_low_conf = bool(self.settings.get("mark_low_conf", pipeline.MARK_LOW_CONF_DEFAULT))
+        self._update_glossary_note()  # 사용자가 용어 파일을 고쳤을 수 있음
+        self.settings.update({"language": self._lang(), "auto_process": bool(self.auto_var.get()),
+                              "quality": quality})
         paths.save_settings(self.settings)
+        log.info("처리 시작: 모델 %s", model)
         self.processing = True
         self.cancel_flag.clear()
         self.last_folder = job.folder

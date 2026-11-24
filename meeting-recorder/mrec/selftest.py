@@ -148,6 +148,7 @@ def gui_device_path(results: list) -> None:
 def run(out_path: str | None = None) -> int:
     results: list[dict] = []
     report: dict = {"version": __version__, "python": sys.version.split()[0], "platform": platform.platform(),
+                    "system": sysinfo.system_summary(),
                     "frozen": bool(getattr(sys, "frozen", False)), "checks": results}
     t0 = time.monotonic()
     tmp = Path(tempfile.mkdtemp(prefix="mrec_selftest_"))
@@ -239,6 +240,17 @@ def run(out_path: str | None = None) -> int:
             _check(results, "참석자 이름 반영", "Alice:" in txt2 and "Kim:" in txt2)
             report["sample_record_md"] = md  # 합성 표본이라 회의 내용이 아닙니다
 
+            # 용어 파일(R4): exe 묶음에는 glossary 폴더가 있어야 함. 개발 환경에서는 참고.
+            from . import glossary
+
+            hints, full = glossary.load_hints(), glossary.load_full()
+            gdetail = f"{glossary.glossary_dir().name}: 힌트 {hints.get('used', 0)}개 사용·{hints.get('dropped', 0)}개 제외, 교정 목록 {len(full)}개"
+            gok = bool(hints) and bool(full) and "=== 용어 목록 시작 ===" in txt
+            if getattr(sys, "frozen", False):
+                _check(results, "용어 파일(힌트·Copilot 교정 목록)", gok, gdetail)
+            else:
+                results.append({"name": "용어 파일(참고: 개발 환경)", "ok": True, "detail": gdetail})
+
             # 혼합 언어: 한 트랙 안에서 한국어 → 영어 → 한국어로 바뀌어도 영어는 영어로, 한국어는 한글로(R3)
             mix = tmp / "회의_혼합언어"
             mix.mkdir()
@@ -251,6 +263,18 @@ def run(out_path: str | None = None) -> int:
             report["mixed_lang_score"] = sc
             _check(results, "혼합 언어(한↔영 전환) 발언별 언어", sc["ok"] == sc["n"] and sc["en_as_hangul"] == 0,
                    f"{sc}")
+
+            # 빠름(small) 모델도 묶음에 있고 동작하는지(R4: 정확=large-v3-turbo 기본, 빠름=small)
+            fast = tmp / "회의_빠름"
+            fast.mkdir()
+            t = time.monotonic()
+            pipeline.run(pipeline.Job(fast, sdir / "sample_mic.flac", None, language="en", model="small"))
+            report["fast_model_seconds"] = round(time.monotonic() - t, 1)
+            ftxt = (fast / output.COPILOT_TXT).read_text(encoding="utf-8-sig").lower()
+            fmeta = output.load_result_json(fast)[1]
+            _check(results, "빠름(small) 모델로 글 옮기기",
+                   fmeta.get("model") == "small" and "finance" in ftxt and "friday" in ftxt)
+            report["model_used_main"] = output.load_result_json(folder)[1].get("model")
     except Exception:
         _check(results, "예외 없음", False, traceback.format_exc()[-2000:])
     finally:
