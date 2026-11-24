@@ -13,3 +13,4 @@ dist/
 __pycache__/
 .pytest_cache/
 *.pyc
+glossary/교정지침.md
