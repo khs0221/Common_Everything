@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import queue
 import shutil
 import subprocess
@@ -23,6 +24,31 @@ log = logging.getLogger("mrec")
 LANG_CHOICES = [("자동(영어/한국어)", None), ("영어", "en"), ("한국어", "ko")]
 SPK_CHOICES = [("자동", None)] + [(f"{n}명", n) for n in range(1, 9)]
 SILENT_WARN_S = 60  # 이 시간 동안 소리가 전혀 없으면 안내
+AUTO_DEVICE = "자동(윈도우에서 쓰는 장치 그대로)"
+LOG_TAIL_LINES = 30
+
+
+def _exc_text(e: BaseException, lines: int = 10) -> str:
+    import traceback
+
+    tb = "".join(traceback.format_exception(type(e), e, e.__traceback__)).rstrip().splitlines()
+    return f"{type(e).__name__}: {e}\n" + "\n".join(tb[-lines:])
+
+
+def error_report(where: str, err_text: str) -> str:
+    """[오류 내용 복사] 에 담는 글: 버전·윈도우 버전·오류·최근 기술 로그(회의 내용 없음)."""
+    from . import __version__
+
+    lines = [f"회의 녹음·기록 {__version__}", f"윈도우/OS: {platform.platform()}",
+             f"파이썬: {sys.version.split()[0]}, exe: {bool(getattr(sys, 'frozen', False))}",
+             f"문제: {where}", "", err_text.rstrip(), "", f"최근 로그(최대 {LOG_TAIL_LINES}줄):"]
+    try:
+        log_file = sysinfo.log_dir() / "app.log"
+        tail = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-LOG_TAIL_LINES:]
+        lines += tail or ["(로그 없음)"]
+    except OSError:
+        lines.append("(로그 없음)")
+    return "\n".join(lines)
 
 
 def fmt_elapsed(s: float) -> str:
@@ -72,12 +98,22 @@ class App:
         f = ttk.LabelFrame(self.root, text="1. 장치")
         f.pack(fill="x", **pad)
         ttk.Label(f, text="내 마이크").grid(row=0, column=0, sticky="w", padx=6, pady=3)
-        self.mic_cb = ttk.Combobox(f, state="readonly", width=48)
+        self.mic_cb = ttk.Combobox(f, state="readonly", width=48, values=[AUTO_DEVICE])
         self.mic_cb.grid(row=0, column=1, sticky="we", padx=6)
+        self.mic_cb.current(0)
         ttk.Label(f, text="상대방 소리(스피커)").grid(row=1, column=0, sticky="w", padx=6, pady=3)
-        self.spk_cb = ttk.Combobox(f, state="readonly", width=48)
+        self.spk_cb = ttk.Combobox(f, state="readonly", width=48, values=[AUTO_DEVICE])
         self.spk_cb.grid(row=1, column=1, sticky="we", padx=6)
+        self.spk_cb.current(0)
         ttk.Button(f, text="장치 새로고침", command=self.refresh_devices).grid(row=0, column=2, rowspan=2, padx=6)
+        ttk.Label(f, text="보통은 '자동' 그대로 두십시오. 특정 장치로 고정하고 싶을 때만 고릅니다.",
+                  foreground="#555").grid(row=2, column=0, columnspan=3, sticky="w", padx=6)
+        # 장치 계층·목록 문제를 숨기지 않고 보여 주는 칸(문제 있을 때만 보임)
+        self.dev_err = tk.StringVar(value="")
+        self.dev_err_label = tk.Label(f, textvariable=self.dev_err, fg="#b71c1c", wraplength=430,
+                                      justify="left", anchor="w")
+        self.copy_btn = ttk.Button(f, text="오류 내용 복사", command=self.copy_error)
+        self._err_report = ""
         f.columnconfigure(1, weight=1)
 
         f = ttk.LabelFrame(self.root, text="2. 녹음")
@@ -144,48 +180,93 @@ class App:
         ttk.Label(self.root, textvariable=self.status, relief="sunken", anchor="w").pack(fill="x", side="bottom")
 
     # ------------------------------------------------------------ 장치
-    def _init_backend(self):
+    def _init_backend(self) -> bool:
+        """장치 계층을 엽니다. 실패하면 원인을 화면에 보여 주고 False."""
         try:
             self.backend = default_backend()
         except Exception as e:
-            self.backend_error = str(e)
-            log.warning("장치 계층을 열 수 없음: %s", e)
+            self.backend = None
+            self.backend_error = e
+            log.exception("장치 계층을 열 수 없음")
+            self._show_device_error(
+                "소리 장치 기능을 시작하지 못했습니다. [장치 새로고침]을 눌러 다시 시도해 보시고, "
+                "계속되면 [오류 내용 복사]를 눌러 담당자에게 보내 주십시오.",
+                "장치 계층 열기", _exc_text(e))
             self.start_btn.configure(state="disabled")
-            self.status.set("소리 장치를 쓸 수 없습니다. 녹음은 안 되고, 기존 녹음 처리만 됩니다.")
-            return
-        self.refresh_devices()
+            self.status.set("소리 장치를 쓸 수 없습니다(녹음 불가). 기존 녹음 처리는 됩니다.")
+            return False
+        self.backend_error = None
+        self._hide_device_error()
+        self.start_btn.configure(state="normal")
+        self._load_device_lists()
+        return True
 
     def refresh_devices(self):
-        if not self.backend:
+        """[장치 새로고침]: 장치 계층이 없으면 만들기부터 다시 시도합니다."""
+        if self.recorder and self.recorder.running:
             return
+        if self.backend is None:
+            if self._init_backend():
+                self.status.set("소리 장치 기능을 다시 시작했습니다.")
+            return
+        self._load_device_lists()
+
+    def _load_device_lists(self):
         try:
             self.mics = self.backend.list_microphones()
             self.spks = self.backend.list_speakers()
         except Exception as e:
-            log.warning("장치 목록 오류: %s", e)
-            messagebox.showerror("장치", f"장치 목록을 읽지 못했습니다.\n{e}")
+            self.mics, self.spks = [], []
+            log.exception("장치 목록 오류")
+            self._fill(self.mic_cb, [], None)
+            self._fill(self.spk_cb, [], None)
+            self._show_device_error(
+                "장치 목록을 읽지 못했습니다. '자동'으로는 그대로 녹음할 수 있습니다.",
+                "장치 목록 읽기", _exc_text(e))
             return
+        self._hide_device_error()
         self._fill(self.mic_cb, self.mics, self.settings.get("mic_id"))
         self._fill(self.spk_cb, self.spks, self.settings.get("speaker_id"))
+        if not self.mics or not self.spks:
+            self.status.set("장치 목록이 비어 있습니다. '자동'으로 녹음을 시도할 수 있습니다.")
 
     @staticmethod
     def _fill(cb: ttk.Combobox, devs: list[DeviceInfo], saved: str | None):
-        names = [("(기본) " if d.is_default else "") + d.name for d in devs]
+        """맨 위는 '자동', 그 아래 장치 목록. 저장된 장치(id)가 목록에 있으면 그것을, 없으면 '자동'.
+
+        예전 설정 호환: mic_id/speaker_id 가 없거나 None 이면 '자동'(예전에도 '기본 장치 따라가기').
+        """
+        names = [AUTO_DEVICE] + [("(현재 기본) " if d.is_default else "") + d.name for d in devs]
         cb.configure(values=names)
-        idx = next((i for i, d in enumerate(devs) if d.id == saved), None)
-        if idx is None:
-            idx = next((i for i, d in enumerate(devs) if d.is_default), 0 if devs else None)
-        if idx is not None:
-            cb.current(idx)
-        else:
-            cb.set("")
+        idx = next((i + 1 for i, d in enumerate(devs) if saved and d.id == saved), 0)
+        cb.current(idx)
 
     def _selected(self, cb: ttk.Combobox, devs: list[DeviceInfo]) -> str | None:
-        """고른 장치 id. '(기본)' 장치를 골랐으면 None: 녹음 중 윈도우 기본 장치가 바뀌면 따라갑니다."""
+        """고른 장치 id. '자동'이면 None(녹음 스레드가 윈도우 기본 장치를 직접 열고, 바뀌면 따라감).
+        목록의 장치를 고르면 그 장치로 고정합니다(현재 기본 장치를 골라도 고정, 감사 N3)."""
         i = cb.current()
-        if not (0 <= i < len(devs)):
+        if i <= 0 or i - 1 >= len(devs):
             return None
-        return None if devs[i].is_default else devs[i].id
+        return devs[i - 1].id
+
+    def _show_device_error(self, msg: str, where: str, err_text: str):
+        self.dev_err.set(msg)
+        self._err_report = error_report(where, err_text)
+        self.dev_err_label.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=(4, 2))
+        self.copy_btn.grid(row=3, column=2, padx=6, pady=(4, 2))
+
+    def _hide_device_error(self):
+        self.dev_err.set("")
+        self._err_report = ""
+        self.dev_err_label.grid_remove()
+        self.copy_btn.grid_remove()
+
+    def copy_error(self):
+        """오류 내용(기술 정보)을 클립보드에 넣습니다."""
+        text = self._err_report or error_report("(표시된 오류 없음)", "")
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status.set("오류 내용을 복사했습니다. 메일·메신저에 붙여 넣어 보내 주십시오.")
 
     def _check_models(self):
         missing = models.missing_models()
@@ -202,6 +283,10 @@ class App:
         if self.processing:
             messagebox.showinfo("녹음", "글로 옮기는 중입니다. 끝난 뒤(또는 취소 후) 녹음해 주십시오.")
             return
+        if self.backend is None and not self._init_backend():
+            messagebox.showerror("녹음 시작", "소리 장치 기능을 시작하지 못했습니다.\n"
+                                 "창의 [오류 내용 복사]로 내용을 복사해 담당자에게 보내 주십시오.")
+            return
         mic_id = self._selected(self.mic_cb, self.mics)
         spk_id = self._selected(self.spk_cb, self.spks)
         try:
@@ -215,10 +300,14 @@ class App:
         except Exception as e:
             log.exception("녹음 시작 실패")
             self.recorder = None
+            self._show_device_error("녹음을 시작하지 못했습니다. 장치 선택을 '자동'으로 바꾸거나 [장치 새로고침] 후 "
+                                    "다시 시도해 주십시오.", "녹음 시작", _exc_text(e))
             messagebox.showerror("녹음 시작", f"녹음을 시작하지 못했습니다.\n장치 선택을 확인해 주십시오.\n\n{e}")
             return
-        self.settings.update({"mic_id": mic_id, "speaker_id": spk_id})
+        self.settings.update({"mic_id": mic_id, "speaker_id": spk_id})  # None = 자동
         paths.save_settings(self.settings)
+        if self.backend_error is None:
+            self._hide_device_error()
         sysinfo.keep_awake(True)
         self.last_folder = folder
         self.silent_since = {"mic": time.monotonic(), "loop": time.monotonic()}
