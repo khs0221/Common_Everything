@@ -199,6 +199,7 @@ def join_utterances(utts: list[Utterance], gap: float = JOIN_GAP_S) -> list[Utte
     out: list[Utterance] = []
     for u in sorted(utts, key=lambda u: (u.start, u.end)):
         if (out and out[-1].speaker == u.speaker and u.start - out[-1].end <= gap
+                and (not u.lang or not out[-1].lang or u.lang == out[-1].lang)  # 언어가 바뀌면 새 줄(R3)
                 and u.end - out[-1].start <= MAX_UTTERANCE_S
                 and len(out[-1].text) + 1 + len(u.text) <= MAX_UTTERANCE_CHARS):
             prev = out[-1]

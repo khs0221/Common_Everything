@@ -16,7 +16,8 @@ from .audio_io import TARGET_SR, read_segment
 from .paths import native_path
 
 AUTO_LANGS = ("en", "ko")  # '자동' 은 영어/한국어 중에서 고릅니다.
-PACK_SECONDS = 180.0  # 묶음 하나의 말소리 길이(초). 언어 자동 판별도 묶음마다 합니다.
+PACK_SECONDS = 180.0  # 묶음 하나의 말소리 길이(초). 묶음 안은 한 언어로만 채웁니다(R3).
+LID_SHARE = 0.1       # 진행률에서 언어 판별이 차지하는 비중
 
 
 def _stub_optional_imports() -> None:
@@ -97,25 +98,66 @@ class Transcriber:
 
         whisper 는 30초 창 단위로 계산하므로, 무음이 많은 트랙(내가 듣고만 있는 마이크 등)을
         구간마다 따로 넣으면 짧은 구간도 30초만큼 계산합니다. 이어 붙이면 그 낭비가 없습니다.
+
+        language=None(자동)이면 먼저 말소리 구간마다 영어/한국어를 판별하고(langid), 같은 언어가
+        같은 언어 구간끼리만 묶어 그 언어로 고정해 옮깁니다. 묶음에 두 언어가 섞이지 않으므로
+        한쪽 언어가 다른 언어로 번역되어 적히지 않습니다(R3).
         """
         out: list[Segment] = []
         total = sum(b - a for a, b in speech) or 1.0
+        self.last_lang_stats = {}
+        if language is None:
+            runs = self.detect_language_runs(wav16k, speech, cancel=cancel,
+                                             progress=(lambda f: progress(f * LID_SHARE)) if progress else None)
+            base = LID_SHARE
+        else:
+            runs = [(language, list(speech))]
+            base = 0.0
         done = 0.0
-        for pack in pack_segments(speech, pack_seconds):
-            if cancel and cancel():
-                raise InterruptedError
-            pieces = [read_segment(wav16k, a, b) for a, b in pack]
-            tmap = TimeMap([(a, len(p) / TARGET_SR) for (a, _), p in zip(pack, pieces)])
-            audio = np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32)
-            del pieces
-            if len(audio) >= TARGET_SR * 0.2:
-                for s in self.transcribe_window(audio, 0.0, language, words):
-                    out.extend(tmap.restore(s))
-            done += sum(b - a for a, b in pack)
-            if progress:
-                progress(done / total)
+        for lang, segs in runs:
+            for pack in pack_segments(segs, pack_seconds):
+                if cancel and cancel():
+                    raise InterruptedError
+                pieces = [read_segment(wav16k, a, b) for a, b in pack]
+                tmap = TimeMap([(a, len(p) / TARGET_SR) for (a, _), p in zip(pack, pieces)])
+                audio = np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32)
+                del pieces
+                if len(audio) >= TARGET_SR * 0.2:
+                    for s in self.transcribe_window(audio, 0.0, lang, words):
+                        out.extend(tmap.restore(s))
+                done += sum(b - a for a, b in pack)
+                if progress:
+                    progress(base + (1 - base) * done / total)
+        out.sort(key=lambda s: s.start)
         return out
 
+    def detect_language_runs(self, wav16k: Path, speech: list[tuple[float, float]],
+                             cancel: Callable[[], bool] | None = None,
+                             progress: Callable[[float], None] | None = None):
+        """말소리 구간마다 언어를 판별해 언어별로 모은 [(언어, [(시작, 끝), ...]), ...] 를 돌려줍니다."""
+        from . import langid
+
+        probe = langid.WhisperLangProbe(self.model)
+        pieces: list = []
+        total = sum(b - a for a, b in speech) or 1.0
+        done = 0.0
+        for a, b in speech:
+            if cancel and cancel():
+                raise InterruptedError
+            audio = read_segment(wav16k, a, b)
+            pieces.extend(langid.split_segment(audio, a, b, probe))
+            done += b - a
+            if progress:
+                progress(done / total)
+        filled = langid.fill_unsure(pieces)
+        runs = langid.group_by_language(filled)
+        self.last_lang_stats = {
+            "pieces": len(filled), "unsure": sum(1 for p in pieces if not p.sure),
+            "split_segments": len(pieces) - len(speech),
+            "seconds": {lang: round(sum(p.end - p.start for p in filled if p.lang == lang), 1)
+                        for lang in langid.LANGS},
+        }
+        return runs
 
 
 def pack_segments(speech: list[tuple[float, float]], pack_seconds: float = PACK_SECONDS) -> list[list[tuple[float, float]]]:

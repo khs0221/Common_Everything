@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import sys
@@ -23,6 +24,26 @@ from pathlib import Path
 from . import __version__, models, offline, output, paths, pipeline, sysinfo
 
 EXPECTED_WORDS = ("finance", "workshop", "Thursday", "budget")
+_HANGUL = re.compile("[\uac00-\ud7a3]")
+_LATIN = re.compile("[A-Za-z]")
+
+
+def text_script(text: str) -> str:
+    """글자 종류로 본 언어: 한글이 더 많으면 'ko', 로마자가 있으면 'en', 없으면 '?'."""
+    h, l = len(_HANGUL.findall(text)), len(_LATIN.findall(text))
+    return "ko" if h > l else ("en" if l else "?")
+
+
+def score_languages(truth: list[dict], utts: list) -> dict:
+    """정답 발언마다 겹치는 출력 줄의 글자 종류가 정답 언어와 같은지 셉니다."""
+    rows = []
+    for t in truth:
+        text = " ".join(u.text for u in utts if min(u.end, t["end"]) - max(u.start, t["start"]) > 0.3)
+        rows.append((t["lang"], text_script(text)))
+    return {"n": len(rows), "ok": sum(a == b for a, b in rows),
+            "en_as_hangul": sum(a == "en" and b == "ko" for a, b in rows),
+            "ko_as_latin": sum(a == "ko" and b == "en" for a, b in rows),
+            "missing": sum(b == "?" for _, b in rows)}
 
 
 def _check(results: list, name: str, ok: bool, detail: str = "") -> bool:
@@ -217,6 +238,19 @@ def run(out_path: str | None = None) -> int:
             txt2 = (folder / output.COPILOT_TXT).read_text(encoding="utf-8-sig")
             _check(results, "참석자 이름 반영", "Alice:" in txt2 and "Kim:" in txt2)
             report["sample_record_md"] = md  # 합성 표본이라 회의 내용이 아닙니다
+
+            # 혼합 언어: 한 트랙 안에서 한국어 → 영어 → 한국어로 바뀌어도 영어는 영어로, 한국어는 한글로(R3)
+            mix = tmp / "회의_혼합언어"
+            mix.mkdir()
+            shutil.copy(sdir / "sample_mixed_lang.flac", mix / "mix.flac")
+            t = time.monotonic()
+            pipeline.run(pipeline.Job(mix, mix / "mix.flac", None, language=None))
+            report["mixed_lang_seconds"] = round(time.monotonic() - t, 1)
+            mtruth = json.loads((sdir / "sample_mixed_lang_truth.json").read_text(encoding="utf-8"))
+            sc = score_languages(mtruth, output.load_result_json(mix)[0])
+            report["mixed_lang_score"] = sc
+            _check(results, "혼합 언어(한↔영 전환) 발언별 언어", sc["ok"] == sc["n"] and sc["en_as_hangul"] == 0,
+                   f"{sc}")
     except Exception:
         _check(results, "예외 없음", False, traceback.format_exc()[-2000:])
     finally:

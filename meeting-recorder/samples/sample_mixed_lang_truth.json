@@ -1,0 +1,86 @@
+[
+ {
+  "lang": "ko",
+  "start": 0.5,
+  "end": 6.12,
+  "text": "그것의 만연한 힘은 왕에서 평민에 이르는 모든 사람에게 영향을 미칩니다.",
+  "source": "FLEURS ko dev 3362819189131912553.wav"
+ },
+ {
+  "lang": "ko",
+  "start": 6.42,
+  "end": 11.98,
+  "text": "스페인 사람들이 3세기 동안 지속된 식민지 시대를 시작했다.",
+  "source": "FLEURS ko dev 15198157449680673582.wav"
+ },
+ {
+  "lang": "ko",
+  "start": 12.28,
+  "end": 18.82,
+  "text": "경찰에 따르면 사진기자를 친 차량의 운전자는 형사 고발을 당할 가능성이 낮다.",
+  "source": "FLEURS ko dev 4772966059713591976.wav"
+ },
+ {
+  "lang": "en",
+  "start": 19.12,
+  "end": 22.68,
+  "text": "Three more bombs exploded near government buildings in a period of two hours.",
+  "source": "FLEURS en dev 8452100455463097357.wav"
+ },
+ {
+  "lang": "en",
+  "start": 22.98,
+  "end": 27.06,
+  "text": "The result of plotting analysis will be posted to a public website.",
+  "source": "FLEURS en dev 6415341913845555034.wav"
+ },
+ {
+  "lang": "en",
+  "start": 27.36,
+  "end": 31.54,
+  "text": "The East African Islands are in the Indian Ocean off the eastern coast of Africa.",
+  "source": "FLEURS en dev 10238777279729691182.wav"
+ },
+ {
+  "lang": "ko",
+  "start": 31.84,
+  "end": 36.96,
+  "text": "일부 축제들은 어린아이들이 있는 가족들을 위한 특별한 캠핑 공간을 가지고 있습니다.",
+  "source": "FLEURS ko dev 9932433357052887169.wav"
+ },
+ {
+  "lang": "ko",
+  "start": 37.26,
+  "end": 43.92,
+  "text": "바다 악어는 바다에서 살지 않으며, 록햄프턴 북쪽 강어귀에 주로 서식한다.",
+  "source": "FLEURS ko dev 8861953164890988075.wav"
+ },
+ {
+  "lang": "en",
+  "start": 44.22,
+  "end": 48.1,
+  "text": "The first cases of the disease this season were reported in late July.",
+  "source": "FLEURS en dev 5498038997689553356.wav"
+ },
+ {
+  "lang": "en",
+  "start": 48.4,
+  "end": 51.32,
+  "text": "The major religion in Moldova is Orthodox Christian.",
+  "source": "FLEURS en dev 10146705666908229607.wav"
+ },
+ {
+  "lang": "en",
+  "start": 51.62,
+  "end": 54.52,
+  "text": "Good morning everyone. Thanks for joining the weekly project call.",
+  "source": "합성음(samples/sample_mic.flac)"
+ },
+ {
+  "lang": "ko",
+  "start": 54.82,
+  "end": 61.44,
+  "text": "필리핀 정복에 사용된 미국 제국주의의 전쟁 비용은 필리핀인 자신들에 의해 지급되었다.",
+  "source": "FLEURS ko dev 13980972984626671687.wav"
+ }
+]
