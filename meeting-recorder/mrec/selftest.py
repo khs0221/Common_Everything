@@ -47,6 +47,79 @@ def _fake_recording(tmp: Path) -> tuple[bool, str]:
     return ok, f"mic={n1} loop={n2} frames, padded(loop)={res.stats['loop']['frames_padded']}"
 
 
+def _exc_detail(e: BaseException, lines: int = 8) -> str:
+    """예외 종류·메시지·traceback 마지막 몇 줄(기술 정보만)."""
+    tb = traceback.format_exception(type(e), e, e.__traceback__)
+    tail = "".join(tb).strip().splitlines()[-lines:]
+    return f"{type(e).__name__}: {e} | " + " / ".join(x.strip() for x in tail)
+
+
+def gui_device_path(results: list) -> None:
+    """화면이 쓰는 것과 똑같은 경로로 장치 계층을 엽니다(R2 재현용).
+
+    Tk 루트 생성 → default_backend()(별도 스레드에서 soundcard 불러오기) → 장치 목록 →
+    기본 장치 id(녹음 스레드 방식: COM 초기화한 스레드에서 조회).
+    불러오기·초기화 실패는 실패, 장치 0개는 참고(CI 러너에는 소리 장치가 없음).
+    이 검사는 이 프로세스에서 soundcard 를 처음 불러올 때 해야 화면과 같은 조건이므로,
+    다른 soundcard 검사보다 먼저 부릅니다.
+    """
+    pre = "soundcard" in sys.modules
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # gui.main 과 같게
+        except Exception:
+            pass
+    root = None
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        _check(results, "화면 경로: Tk 루트 생성", True)
+    except Exception as e:
+        _check(results, "화면 경로: Tk 루트 생성", False, _exc_detail(e))
+    try:
+        from .devices import _run_in_mta, default_backend
+
+        try:
+            backend = default_backend()
+            _check(results, "화면 경로: 장치 계층 열기(default_backend)", True,
+                   f"{type(backend).__name__}, 검사 전 soundcard 불러옴={pre}")
+        except BaseException as e:
+            _check(results, "화면 경로: 장치 계층 열기(default_backend)", False,
+                   f"검사 전 soundcard 불러옴={pre} | {_exc_detail(e)}")
+            return
+        n = {}
+        for kind, fn in (("마이크", backend.list_microphones), ("스피커", backend.list_speakers)):
+            try:
+                devs = fn()
+                n[kind] = len(devs)
+                _check(results, f"화면 경로: {kind} 목록 읽기", True,
+                       f"{len(devs)}개, 기본 표시 {sum(d.is_default for d in devs)}개"
+                       + (" (0개: 참고, CI 에는 장치 없음)" if not devs else ""))
+            except BaseException as e:
+                n[kind] = None
+                _check(results, f"화면 경로: {kind} 목록 읽기", False, _exc_detail(e))
+        for kind, fn in (("마이크", backend.default_microphone_id), ("스피커", backend.default_speaker_id)):
+            try:
+                did = _run_in_mta(fn)
+                _check(results, f"화면 경로: 기본 {kind} id(녹음 스레드 방식)", True, "있음" if did else "없음")
+            except BaseException as e:
+                if n.get(kind) == 0:  # 장치가 없으면 기본 장치도 없음: 참고
+                    results.append({"name": f"화면 경로: 기본 {kind} id(참고: 장치 0개)", "ok": True,
+                                    "detail": _exc_detail(e, 4)})
+                else:
+                    _check(results, f"화면 경로: 기본 {kind} id(녹음 스레드 방식)", False, _exc_detail(e))
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
 def run(out_path: str | None = None) -> int:
     results: list[dict] = []
     report: dict = {"version": __version__, "python": sys.version.split()[0], "platform": platform.platform(),
@@ -63,6 +136,11 @@ def run(out_path: str | None = None) -> int:
         except OSError:
             blocked = False
         _check(results, "외부 접속 차단", blocked)
+
+        if os.name == "nt":
+            gui_device_path(results)  # soundcard 를 처음 불러오는 검사라 맨 앞에 둠
+        else:
+            results.append({"name": "화면 경로 장치 검사(참고)", "ok": True, "detail": "윈도우 전용이라 건너뜀"})
 
         mdir = paths.models_dir()
         missing = models.missing_models(mdir)
