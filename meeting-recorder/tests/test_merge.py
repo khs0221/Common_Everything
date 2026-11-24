@@ -114,3 +114,13 @@ def test_language_change_starts_new_line():
             Utterance(4.2, 5, "me", "Okay.", "en")]
     out = join_utterances(utts)
     assert [(u.text, u.lang) for u in out] == [("안녕하세요.", "ko"), ("Let's start. Okay.", "en")]
+
+
+def test_mark_low_conf_words_and_join():
+    from mrec.merge import mark_low_conf
+
+    ws = [Word(0, 1, " The", 0.9), Word(1, 2, " CPK", 0.1), Word(2, 3, " is", 0.8)]
+    assert mark_low_conf(ws, 0.3) == "The CPK(?) is"
+    seg = Segment(0, 3, "The CPK is", "en", ws)
+    u = mic_utterances([seg])[0]
+    assert u.text == "The CPK is" and u.marked == "The CPK(?) is"

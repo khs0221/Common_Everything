@@ -77,6 +77,9 @@ jobs:
           New-Item -ItemType Directory -Force "$dist/licenses" | Out-Null
           Copy-Item docs/라이선스.md "$dist/licenses/라이선스.md"
           Copy-Item models/sherpa-onnx-pyannote-segmentation-3-0/LICENSE "$dist/licenses/pyannote-segmentation-3.0-LICENSE.txt"
+          # 분야 용어 파일: 사용자가 메모장으로 고칠 수 있게 exe 옆 glossary 폴더에 그대로 둠(R4)
+          Copy-Item -Recurse glossary "$dist/glossary"
+          if (Test-Path "docs/용어/출처.md") { Copy-Item "docs/용어/출처.md" "$dist/licenses/용어_출처.md" }
 
       - name: 자체 시험(exe --selftest, 장치 불필요)
         run: |
@@ -107,6 +110,9 @@ jobs:
           if (Test-Path $dist) {
             $mb = (Get-ChildItem -Recurse $dist | Measure-Object -Property Length -Sum).Sum / 1MB
             Write-Host ("전체 크기(압축 전): {0:N0} MB" -f $mb)
+            foreach ($m in @("faster-whisper-small", "faster-whisper-large-v3-turbo")) {
+              if (Test-Path "$dist/models/$m/model.bin") { Write-Host "포함: $m" } else { Write-Host "::error::$m 이 묶음에 없습니다" }
+            }
             Get-ChildItem "$dist/_internal" -Directory | ForEach-Object {
               $s = (Get-ChildItem -Recurse $_.FullName | Measure-Object -Property Length -Sum).Sum / 1MB
               "{0,8:N1} MB  {1}" -f $s, $_.Name } | Sort-Object | Select-Object -Last 15

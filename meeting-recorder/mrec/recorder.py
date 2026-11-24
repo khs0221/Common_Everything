@@ -77,6 +77,7 @@ class AlignedTrack:
         self.stop_event = stop
         self.default_probe = default_probe  # None 이면 고른 장치에 고정
         self.source: Source | None = None
+        self.device_name: str | None = None
         self._source_closed = True
         self.sr: int | None = samplerate
         self.started_at: float | None = None  # 처음 스트림 시작 시각
@@ -167,6 +168,7 @@ class AlignedTrack:
             self.sr = int(src.samplerate)
         self._rs = None if int(src.samplerate) == self.sr else Resampler(int(src.samplerate), self.sr)
         self.opened_id = getattr(src, "device_id", None)
+        self.device_name = getattr(src, "device_name", None) or self.opened_id
         if self.started_at is None:
             self.started_at = started
         self._q.put(("sync", started))
@@ -411,6 +413,10 @@ class Recorder:
     def errors(self) -> dict[str, str]:
         """기록된 마지막 오류(다시 연결된 뒤에도 남음, 기술 정보)."""
         return {k: t.stats.error for k, t in self.tracks.items() if t.stats.error}
+
+    def device_names(self) -> dict[str, str | None]:
+        """실제로 열린 장치 이름(진단용)."""
+        return {k: t.device_name for k, t in self.tracks.items()}
 
     def problems(self) -> dict[str, str]:
         """지금 화면에 경고로 띄울 문제."""

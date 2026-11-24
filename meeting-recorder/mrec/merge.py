@@ -31,6 +31,7 @@ class Utterance:
     speaker: str   # 'me', 'spk1', 'spk2', ..., 'spk?'
     text: str
     lang: str = ""
+    marked: str = ""  # 확신 낮은 단어에 (?) 를 붙인 글(대화록.txt·Copilot용.txt 에만 씀, R4)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -70,6 +71,25 @@ def _speaker_at(a: float, b: float, turns: list[tuple[float, float, str]],
 
 def _join_words(words: list[str]) -> str:
     return "".join(words).strip()
+
+
+LOW_CONF_PROB = 0.3  # 이보다 확률이 낮은 단어에 (?) 표시(측정 근거: R4 changes.md)
+
+
+def mark_low_conf(words, threshold: float = LOW_CONF_PROB) -> str:
+    """단어 목록을 이어 붙이되, 확률이 threshold 보다 낮은 단어 뒤에 (?) 를 붙입니다."""
+    parts = []
+    for w in words:
+        t = w.text
+        if getattr(w, "prob", 1.0) < threshold and t.strip():
+            t = t.rstrip() + "(?)"
+        parts.append(t)
+    return "".join(parts).strip()
+
+
+def _seg_marked(seg) -> str:
+    ws = [w for w in getattr(seg, "words", []) if w.text.strip()]
+    return mark_low_conf(ws) if ws else ""
 
 
 def _runs(labels: list[str], items: list) -> list[tuple[str, list]]:
@@ -116,12 +136,12 @@ def assign_loop_segments(segments: list[Segment], turns: list[Turn]) -> list[Utt
     lt = relabel_turns(turns)
     if not lt:
         # 화자 분리 결과가 없으면(말이 아주 짧은 경우 등) 모두 참석자 1 로 봅니다.
-        return join_utterances([Utterance(s.start, s.end, "spk1", s.text, s.lang) for s in segments])
+        return join_utterances([Utterance(s.start, s.end, "spk1", s.text, s.lang, _seg_marked(s)) for s in segments])
     pieces: list[Utterance] = []
     for seg in segments:  # 단어 시각이 없는 구간(드묾)은 구간 단위로
         if not any(w.text.strip() for w in seg.words):
             spk = _speaker_at(seg.start, seg.end, lt, nearest_s=3.0) or UNKNOWN
-            pieces.append(Utterance(seg.start, seg.end, spk, seg.text, seg.lang))
+            pieces.append(Utterance(seg.start, seg.end, spk, seg.text, seg.lang, _seg_marked(seg)))
     for sent in _sentences(segments):
         words = [w for w, _ in sent]
         lang = sent[0][1]
@@ -146,7 +166,8 @@ def assign_loop_segments(segments: list[Segment], turns: list[Turn]) -> list[Utt
             # 나눌 때도 짧은 조각은 이웃에 붙입니다.
             runs = _runs(_smooth_runs(labels, words), words)
         for spk, ws in runs:
-            pieces.append(Utterance(ws[0].start, ws[-1].end, spk, _join_words([w.text for w in ws]), lang))
+            pieces.append(Utterance(ws[0].start, ws[-1].end, spk, _join_words([w.text for w in ws]), lang,
+                                    mark_low_conf(ws)))
     return join_utterances(pieces)
 
 
@@ -187,7 +208,7 @@ def _smooth_runs(labels: list[str], words) -> list[str]:
 
 
 def mic_utterances(segments: list[Segment]) -> list[Utterance]:
-    return join_utterances([Utterance(s.start, s.end, ME, s.text, s.lang) for s in segments])
+    return join_utterances([Utterance(s.start, s.end, ME, s.text, s.lang, _seg_marked(s)) for s in segments])
 
 
 def join_utterances(utts: list[Utterance], gap: float = JOIN_GAP_S) -> list[Utterance]:
@@ -205,9 +226,10 @@ def join_utterances(utts: list[Utterance], gap: float = JOIN_GAP_S) -> list[Utte
             prev = out[-1]
             prev.end = max(prev.end, u.end)
             prev.text = f"{prev.text} {u.text}".strip()
+            prev.marked = f"{prev.marked or prev.text} {u.marked or u.text}".strip() if (prev.marked or u.marked) else ""
             prev.lang = prev.lang or u.lang
         else:
-            out.append(Utterance(u.start, u.end, u.speaker, u.text, u.lang))
+            out.append(Utterance(u.start, u.end, u.speaker, u.text, u.lang, u.marked))
     return out
 
 

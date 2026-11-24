@@ -11,13 +11,17 @@ from pathlib import Path
 
 from .paths import models_dir
 
-WHISPER_DIR = "faster-whisper-small"
+WHISPER_DIR = "faster-whisper-small"                  # 빠름(small)
+WHISPER_TURBO_DIR = "faster-whisper-large-v3-turbo"   # 정확(large-v3-turbo, 기본, R4 측정으로 medium 대신 채택)
+WHISPER_DIRS = {"small": WHISPER_DIR, "turbo": WHISPER_TURBO_DIR}
 SEGMENTATION = "sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx"
 EMBEDDING = "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
 VAD = "silero_vad.onnx"
 
 GH = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
 HF = "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120"
+# faster-whisper 1.2.1 이 'large-v3-turbo' 이름으로 쓰는 CTranslate2 변환본(openai/whisper-large-v3-turbo, MIT)
+HF_TURBO = "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,17 @@ FILES: tuple[ModelFile, ...] = (
               "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"),
     ModelFile(f"{WHISPER_DIR}/vocabulary.txt", f"{HF}/vocabulary.txt",
               "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"),
+    # large-v3-turbo: 2026-11-24 받음, 모델 카드 license: mit. preprocessor_config.json(멜 128개 설정)도 필요
+    ModelFile(f"{WHISPER_TURBO_DIR}/model.bin", f"{HF_TURBO}/model.bin",
+              "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"),
+    ModelFile(f"{WHISPER_TURBO_DIR}/config.json", f"{HF_TURBO}/config.json",
+              "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e"),
+    ModelFile(f"{WHISPER_TURBO_DIR}/preprocessor_config.json", f"{HF_TURBO}/preprocessor_config.json",
+              "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"),
+    ModelFile(f"{WHISPER_TURBO_DIR}/tokenizer.json", f"{HF_TURBO}/tokenizer.json",
+              "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd"),
+    ModelFile(f"{WHISPER_TURBO_DIR}/vocabulary.json", f"{HF_TURBO}/vocabulary.json",
+              "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"),
     ModelFile(SEGMENTATION, f"{GH}/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
               "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d",
               archive_member="sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx"),

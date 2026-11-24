@@ -64,3 +64,20 @@ def test_timemap_junction_word_follows_sentence():
     out = tm.restore(seg)
     assert [o.text for o in out] == ["March.", "I can"]
     assert out[1].start == 50.0  # 두 번째 구간 시작으로 자름
+
+
+def test_track_gain_only_for_quiet_tracks(tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    from mrec import vad
+
+    t = np.arange(16000 * 3) / 16000
+    loud = (0.3 * np.sin(2 * np.pi * 300 * t)).astype(np.float32)
+    sf.write(str(tmp_path / "loud.wav"), loud, 16000, subtype="PCM_16")
+    sf.write(str(tmp_path / "quiet.wav"), loud * 0.01, 16000, subtype="PCM_16")
+    sf.write(str(tmp_path / "zero.wav"), np.zeros(16000, np.float32), 16000, subtype="PCM_16")
+    assert vad.track_gain(tmp_path / "loud.wav") == 1.0
+    g = vad.track_gain(tmp_path / "quiet.wav")
+    assert 15 < g <= vad.GAIN_MAX
+    assert vad.track_gain(tmp_path / "zero.wav") == 1.0
