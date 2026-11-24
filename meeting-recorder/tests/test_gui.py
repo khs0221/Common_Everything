@@ -1,4 +1,7 @@
-"""화면 연기 시험: 가짜 장치로 녹음 시작·중지, 처리 없이 결과 폴더가 생기는지."""
+"""화면 연기 시험: 가짜 장치로 녹음 시작·중지, 처리 없이 결과 폴더가 생기는지.
+
+Tk 루트는 conftest 가 세션에서 한 번만 만들고(제품과 같음), 각 시험은 `tk_window`(Toplevel)에 화면을 올립니다.
+"""
 import os
 import time
 
@@ -7,17 +10,17 @@ import pytest
 pytestmark = pytest.mark.gui
 
 
-def test_gui_record_with_fake_devices(tmp_path, monkeypatch):
+def test_gui_record_with_fake_devices(tmp_path, monkeypatch, tk_window):
     monkeypatch.setenv("MREC_FAKE_DEVICES", "1")
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
-    import tkinter as tk
     from tkinter import messagebox
 
     from mrec import gui
 
     monkeypatch.setattr(messagebox, "askyesno", lambda *a, **k: False)
     monkeypatch.setattr(messagebox, "showerror", lambda *a, **k: (_ for _ in ()).throw(AssertionError(a)))
-    root = tk.Tk()
+    root = tk_window
+    app = None
     try:
         app = gui.App(root)
         app.out_dir = tmp_path / "out"
@@ -37,13 +40,13 @@ def test_gui_record_with_fake_devices(tmp_path, monkeypatch):
         assert (folders[0] / "마이크_나.wav").is_file() and (folders[0] / "스피커_상대방.wav").is_file()
         assert str(app.start_btn["state"]) == "normal"
     finally:
-        root.destroy()
+        if app is not None and app.recorder is not None and app.recorder.running:
+            app.recorder.stop()  # 단언이 실패해도 녹음 스레드를 남기지 않음
 
 
-def test_gui_shows_alarm_on_device_loss(tmp_path, monkeypatch):
+def test_gui_shows_alarm_on_device_loss(tmp_path, monkeypatch, tk_window):
     """장치가 끊기면 빨간 경고가 뜨고, 다시 연결되면 사라집니다(F2)."""
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
-    import tkinter as tk
     from tkinter import messagebox
 
     from mrec import gui
@@ -61,7 +64,8 @@ def test_gui_shows_alarm_on_device_loss(tmp_path, monkeypatch):
         return FakeSource(16000, tone(660, 0.2, 16000))
 
     monkeypatch.setattr(gui, "default_backend", lambda: FakeBackend(loop=loop))
-    root = tk.Tk()
+    root = tk_window
+    app = None
     try:
         app = gui.App(root)
         app.out_dir = tmp_path / "out"
@@ -77,4 +81,5 @@ def test_gui_shows_alarm_on_device_loss(tmp_path, monkeypatch):
         app.stop_recording()
         assert "다시 연결" in app.status.get()
     finally:
-        root.destroy()
+        if app is not None and app.recorder is not None and app.recorder.running:
+            app.recorder.stop()  # 단언이 실패해도 녹음 스레드를 남기지 않음
