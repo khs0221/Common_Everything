@@ -75,9 +75,13 @@ def gui_device_path(results: list) -> None:
     try:
         import tkinter as tk
 
-        root = tk.Tk()
-        root.withdraw()
-        _check(results, "화면 경로: Tk 루트 생성", True)
+        existing = getattr(tk, "_default_root", None)
+        if existing is not None:  # 시험 프로세스 등 이미 Tk 루트가 있으면 그것을 씀(Tk 는 프로세스당 하나)
+            _check(results, "화면 경로: Tk 루트 생성", True, "이미 있는 Tk 루트 사용")
+        else:
+            root = tk.Tk()
+            root.withdraw()
+            _check(results, "화면 경로: Tk 루트 생성", True)
     except Exception as e:
         _check(results, "화면 경로: Tk 루트 생성", False, _exc_detail(e))
     try:
@@ -220,12 +224,28 @@ def run(out_path: str | None = None) -> int:
     report["peak_memory_mb"] = round(sysinfo.peak_memory_mb() or -1, 0)
     report["total_seconds"] = round(time.monotonic() - t0, 1)
     report["ok"] = all(c["ok"] for c in results)
+    # 실패 요약을 맨 끝에 둡니다(CI 로그 꼬리에서 바로 보이게).
+    report["failed_summary"] = failed_summary(results)
     text = json.dumps(report, ensure_ascii=False, indent=1)
     if out_path:
         Path(out_path).write_text(text, encoding="utf-8")
     if sys.stdout is not None:
         try:
             print(text)
+            if report["failed_summary"]:
+                print("=== selftest 실패 항목 ===")
+                for line in report["failed_summary"]:
+                    print(line)
         except Exception:
             pass
     return 0 if report["ok"] else 1
+
+
+def failed_summary(results: list, width: int = 400) -> list[str]:
+    """실패한 항목의 '이름: detail(앞부분)' 목록."""
+    out = []
+    for c in results:
+        if not c["ok"]:
+            d = " ".join(str(c.get("detail", "")).split())
+            out.append(f"{c['name']}: {d[:width]}")
+    return out

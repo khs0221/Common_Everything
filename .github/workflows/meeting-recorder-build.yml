@@ -82,7 +82,12 @@ jobs:
           Write-Host "exit code: $code"
           if (-not (Test-Path $out)) { Write-Host "::error::selftest.json 없음"; exit 1 }
           Get-Content $out -Encoding utf8
-          $ok = (Get-Content $out -Raw -Encoding utf8 | ConvertFrom-Json).ok
+          $rep = Get-Content $out -Raw -Encoding utf8 | ConvertFrom-Json
+          $ok = $rep.ok
+          if ($rep.failed_summary) {
+            Write-Host "=== selftest 실패 항목 ==="
+            foreach ($line in $rep.failed_summary) { Write-Host "::error::$line" }
+          }
           # 판정: 결과 파일의 ok 가 true 이고, 종료 코드가 0(또는 읽지 못해 비어 있음)일 때만 성공
           if ($ok -ne $true) { Write-Host "::error::selftest 실패(ok=$ok)"; exit 1 }
           if ($null -ne $code -and $code -ne 0) { Write-Host "::error::selftest 종료 코드 $code"; exit 1 }
