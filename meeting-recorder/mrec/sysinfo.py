@@ -40,6 +40,67 @@ def peak_memory_mb() -> float | None:
         return None
 
 
+MAX_THREADS = 8
+
+
+def compute_threads(cpu_count: int | None = None) -> int:
+    """계산(글 옮기기·화자 분리)에 쓸 스레드 수: 논리 코어 수 - 1(화면 응답용 1개 남김), 1~MAX_THREADS.
+
+    예: 4코어 → 3, 8코어(가상 PC 등) → 7, 16코어 → 8.
+    """
+    n = cpu_count if cpu_count is not None else (os.cpu_count() or 4)
+    env = os.environ.get("MREC_THREADS")
+    if env and env.isdigit() and int(env) > 0:
+        return min(int(env), 64)
+    return max(1, min(MAX_THREADS, n - 1 if n >= 2 else 1))
+
+
+def total_memory_mb() -> float | None:
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MS(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            m = MS()
+            m.dwLength = ctypes.sizeof(MS)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+                return m.ullTotalPhys / (1024 * 1024)
+            return None
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024 * 1024)
+    except Exception:
+        return None
+
+
+def session_kind() -> str:
+    """원격 세션 여부(간단 판단). 윈도우 SESSIONNAME 이 'RDP-' 로 시작하면 원격 데스크톱."""
+    name = os.environ.get("SESSIONNAME", "")
+    if name.upper().startswith("RDP-"):
+        return f"원격 데스크톱({name})"
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            if ctypes.windll.user32.GetSystemMetrics(0x1000):  # SM_REMOTESESSION
+                return "원격 세션"
+        except Exception:
+            pass
+        return f"로컬({name or '알 수 없음'})"
+    return "해당 없음"
+
+
+def system_summary() -> dict:
+    """진단용 기술 정보(회의 내용 없음)."""
+    mem = total_memory_mb()
+    return {"cpu_logical": os.cpu_count(), "threads": compute_threads(),
+            "memory_total_mb": round(mem) if mem else None, "session": session_kind()}
+
+
 def log_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     root = Path(base) if base else Path.home() / ".cache"

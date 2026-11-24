@@ -20,8 +20,13 @@ from .recorder import INFO_FILE, LOOP_FILE, MIC_FILE
 log = logging.getLogger("mrec")
 
 # 단계별 진행률 비중(합 1.0)
-STEPS = [("준비", 0.03), ("말소리 찾기", 0.05), ("발언자 구분", 0.17), ("모델 읽기", 0.03),
-         ("나(마이크) 글로 옮기기", 0.30), ("상대방(스피커) 글로 옮기기", 0.40), ("결과 쓰기", 0.02)]
+STEPS = [("준비", 0.02), ("말소리 찾기", 0.04), ("발언자 구분", 0.10), ("언어 판별", 0.04), ("모델 읽기", 0.02),
+         ("나(마이크) 글로 옮기기", 0.33), ("상대방(스피커) 글로 옮기기", 0.43), ("결과 쓰기", 0.02)]
+MODELS = {"accurate": "turbo", "fast": "small"}  # 화면의 처리 품질 → whisper 모델
+LID_MODEL = "small"
+# 확신 낮은 단어 (?) 표시: 측정에서 표시 정확도(정밀도) 0.5 이하·틀린 단어 중 표시 비율 0.12~0.32 로 쓸모가
+# 작아 기본으로 끕니다(화면에도 두지 않음). 기능은 남겨 두어 처리결과.json 의 marked 로 다시 쓸 수 있습니다.
+MARK_LOW_CONF_DEFAULT = False  # 발언 단위 언어 판별은 small 로(측정 근거: R4 changes.md)
 
 ProgressCb = Callable[[str, float], None]  # (단계 이름, 전체 0~1)
 
@@ -35,6 +40,10 @@ class Job:
     num_speakers: int | None = None  # 스피커 쪽 참석자 수(None=자동)
     beam_size: int = 1
     meta: dict = field(default_factory=dict)
+    model: str = "turbo"            # 글로 옮기는 모델: 'turbo'(정확, large-v3-turbo, 기본) / 'small'(빠름)
+    lid_model: str | None = LID_MODEL  # 언어 판별 모델(None 이면 model 과 같음)
+    hints: bool = True              # 용어 힌트(glossary/hint_terms.txt) 사용
+    mark_low_conf: bool = MARK_LOW_CONF_DEFAULT  # 대화록.txt·Copilot용.txt 에 확신 낮은 단어 (?) 표시
 
 
 @dataclass
@@ -103,8 +112,15 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         # 2) 말소리 구간
         pr.step(1)
         t = time.monotonic()
+        gains = {}
         mic_segs = vad.speech_segments(mic16, lambda f: pr.part(f * 0.5), cancel=cancel) if mic16 else []
+        if mic16:
+            gains["mic"] = round(getattr(vad.speech_segments, "last_gain", 1.0), 2)
         loop_segs = vad.speech_segments(loop16, lambda f: pr.part(0.5 + f * 0.5), cancel=cancel) if loop16 else []
+        if loop16:
+            gains["loop"] = round(getattr(vad.speech_segments, "last_gain", 1.0), 2)
+        if any(g > 1.0 for g in gains.values()):
+            log.info("말소리 찾기 음량 보정 배율: %s", gains)
         timings["vad"] = time.monotonic() - t
 
         # 3) 발언자 구분(스피커 트랙)
@@ -116,33 +132,58 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         gc.collect()
         timings["diarize"] = time.monotonic() - t
 
-        # 4) 글로 옮기기
+        # 4) 언어 판별(자동일 때) → 글로 옮기기. 두 모델을 동시에 메모리에 올리지 않습니다.
         mic_out, loop_out = [], []
         lang_stats: dict = {}
+        hint = {}
         if mic_segs or loop_segs:  # 말소리가 하나도 없으면 모델을 읽지 않습니다
+            from . import glossary
+
+            lid_name = job.lid_model or job.model
+            runs = {"mic": None, "loop": None}
             pr.step(3)
             t = time.monotonic()
-            tr = Transcriber(beam_size=job.beam_size)
-            timings["load_asr"] = time.monotonic() - t
+            tr = None
+            if job.language is None:
+                lid = Transcriber(beam_size=job.beam_size, model=lid_name)
+                for key, wav, segs, w0 in (("mic", mic16, mic_segs, 0.0), ("loop", loop16, loop_segs, 0.5)):
+                    if wav and segs:
+                        runs[key] = lid.detect_language_runs(wav, segs, cancel=cancel,
+                                                             progress=lambda f, w0=w0: pr.part(w0 + f * 0.5))
+                        lang_stats[key] = lid.last_lang_stats
+                if lid_name == job.model:
+                    tr = lid  # 같은 모델이면 다시 읽지 않음
+                else:
+                    del lid
+                    gc.collect()
+            timings["lid"] = time.monotonic() - t
             pr.step(4)
+            t = time.monotonic()
+            hint = glossary.load_hints() if job.hints else {}
+            if tr is None:
+                tr = Transcriber(beam_size=job.beam_size, model=job.model, hotwords=hint.get("hotwords"),
+                                 hint_vocab_text=hint.get("terms_text"))
+            else:
+                tr.hotwords = hint.get("hotwords")
+                tr.hint_vocab_text = hint.get("terms_text")
+            timings["load_asr"] = time.monotonic() - t
+            pr.step(5)
             t = time.monotonic()
             if mic16 and mic_segs:
                 mic_out = tr.transcribe_file(mic16, mic_segs, job.language, words=True,
-                                             progress=pr.part, cancel=cancel)
-                lang_stats["mic"] = getattr(tr, "last_lang_stats", {})
+                                             progress=pr.part, cancel=cancel, runs=runs["mic"])
             timings["asr_mic"] = time.monotonic() - t
-            pr.step(5)
+            pr.step(6)
             t = time.monotonic()
             if loop16 and loop_segs:
                 loop_out = tr.transcribe_file(loop16, loop_segs, job.language, words=True,
-                                              progress=pr.part, cancel=cancel)
-                lang_stats["loop"] = getattr(tr, "last_lang_stats", {})
+                                              progress=pr.part, cancel=cancel, runs=runs["loop"])
             timings["asr_loop"] = time.monotonic() - t
             del tr
             gc.collect()
 
         # 5) 합치기·쓰기
-        pr.step(6)
+        pr.step(7)
         utts = merge.merge_tracks(merge.mic_utterances(mic_out), merge.assign_loop_segments(loop_out, turns))
         meta = dict(job.meta)
         meta.setdefault("started_at", None)
@@ -153,6 +194,11 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         meta["mode"] = "two_tracks" if (job.mic and job.loop) else "single_file"
         if lang_stats:
             meta["language_detection"] = lang_stats  # 트랙별 언어 판별 기술 정보(구간 수·언어별 초)
+        meta["model"] = job.model
+        meta["low_conf_marks"] = bool(job.mark_low_conf)
+        meta["vad_gain"] = gains
+        if hint:
+            meta["hints"] = {k: hint[k] for k in ("used", "dropped", "file", "read") if k in hint}
         names = {}
         if (job.folder / output.RESULT_JSON).is_file():
             try:  # 다시 처리할 때 전에 정한 이름은 번호가 바뀔 수 있어 쓰지 않음('나' 이름만 유지)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import bisect
 import os
+import re
 import sys
 import types
 from dataclasses import dataclass, field
@@ -11,7 +12,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import models
+from . import models, sysinfo
 from .audio_io import TARGET_SR, read_segment
 from .paths import native_path
 
@@ -40,6 +41,7 @@ class Word:
     start: float
     end: float
     text: str
+    prob: float = 1.0  # whisper 의 단어 확률(확신이 낮은 단어 표시용, R4)
 
 
 @dataclass
@@ -52,20 +54,66 @@ class Segment:
 
 
 class Transcriber:
-    def __init__(self, model_dir: Path | None = None, threads: int | None = None, beam_size: int = 1):
+    def __init__(self, model_dir: Path | None = None, threads: int | None = None, beam_size: int = 1,
+                 model: str = "small", hotwords: str | None = None, hint_langs: tuple[str, ...] = ("en",),
+                 hint_vocab_text: str | None = None):
+        """model: 'small'(빠름) 또는 'turbo'(정확, large-v3-turbo). hotwords: 인식 힌트 문자열(hint_langs 언어 묶음에만)."""
         _stub_optional_imports()
         from faster_whisper import WhisperModel
 
-        model_dir = model_dir or models.path(models.WHISPER_DIR)
-        threads = threads or max(1, min(8, (os.cpu_count() or 4)))
+        self.model_name = model
+        self.prev_text = False  # condition_on_previous_text(측정 뒤 결정, R4 changes.md)
+        self.hotwords = hotwords or None
+        self.hint_vocab_text = hint_vocab_text  # 끼어듦 검사용 용어(문맥 문장 제외). 없으면 hotwords 전체
+        self.hint_langs = tuple(hint_langs)
+        model_dir = model_dir or models.path(models.WHISPER_DIRS[model])
+        threads = threads or sysinfo.compute_threads()
         self.beam_size = beam_size
         self.model = WhisperModel(native_path(model_dir), device="cpu", compute_type="int8",
                                   cpu_threads=threads, num_workers=1, local_files_only=True)
 
-    def _run(self, audio, language: str | None, words: bool):
+    def _hints_active(self, language: str | None) -> bool:
+        return bool(self.hotwords) and language in self.hint_langs
+
+    def hint_echo(self, text: str) -> bool:
+        """힌트 목록을 그대로 읊은 듯한 출력인지(무음·잡음에서 생기는 부작용, R4 측정).
+
+        단어가 3개 이상이고 절반 이상이 힌트 용어의 단어이면서 쉼표로 나열하거나(2개 이상) 반복되면
+        (서로 다른 단어 비율 0.5 이하), 또는 같은 단어가 세 번 이상 연속되거나 6단어 이상에서 서로 다른
+        단어 비율이 0.3 이하이면 그렇다고 봅니다. 그렇다고 보면 그 묶음만 힌트 없이 다시 옮기므로(R3 와 같은
+        결과), 잘못 걸려도 결과가 나빠지지 않고 시간만 더 듭니다.
+        """
+        ws = re.findall(r"[a-z0-9][a-z0-9&.\-]*", text.lower())
+        ws = [w.strip(".-") for w in ws if w.strip(".-")]
+        if len(ws) < 3:
+            return False
+        uniq = len(set(ws)) / len(ws)
+        if len(ws) >= 6 and uniq <= 0.3:
+            return True
+        run = best = 1
+        for a, b in zip(ws, ws[1:]):
+            run = run + 1 if a == b else 1
+            best = max(best, run)
+        if best >= 3:  # 같은 단어 세 번 연속
+            return True
+        vocab = self._hint_vocab()
+        inv = sum(w in vocab for w in ws) / len(ws)
+        return inv >= 0.5 and (text.count(",") >= 2 or uniq <= 0.5)
+
+    def _hint_vocab(self) -> set:
+        src = getattr(self, "hint_vocab_text", None) or self.hotwords or ""
+        if getattr(self, "_vocab_src", None) != src:
+            self._vocab_src = src
+            self._vocab = {w.strip(".-") for w in re.findall(r"[a-z0-9][a-z0-9&.\-]*", src.lower())}
+        return self._vocab
+
+    def _run(self, audio, language: str | None, words: bool, hints: bool = True):
+        # hotwords: faster-whisper 1.2.1 은 30초 창마다 프롬프트 앞에 붙입니다(get_prompt).
+        # initial_prompt 는 condition_on_previous_text=False 이면 묶음의 첫 창에만 쓰여 쓰지 않습니다(R4).
+        hot = self.hotwords if (hints and self._hints_active(language)) else None
         segs, info = self.model.transcribe(
             audio, language=language, beam_size=self.beam_size, vad_filter=False,
-            condition_on_previous_text=False, word_timestamps=words,
+            condition_on_previous_text=self.prev_text, word_timestamps=words, hotwords=hot,
             without_timestamps=False, temperature=(0.0, 0.2, 0.4, 0.6),
             log_prob_threshold=-1.0, no_speech_threshold=0.6, compression_ratio_threshold=2.4)
         return list(segs), info
@@ -78,6 +126,10 @@ class Transcriber:
             probs = dict(info.all_language_probs or [])
             lang = max(AUTO_LANGS, key=lambda k: probs.get(k, 0.0))
             segs, info = self._run(audio, lang, words)
+        if self._hints_active(lang) and any(self.hint_echo(s.text) for s in segs):
+            # 힌트 때문에 말하지 않은 용어가 끼어든 것으로 보이면 이 묶음은 힌트 없이 다시 옮깁니다.
+            self.hint_retries = getattr(self, "hint_retries", 0) + 1
+            segs, info = self._run(audio, lang, words, hints=False)
         out: list[Segment] = []
         for s in segs:
             text = s.text.strip()
@@ -86,14 +138,16 @@ class Transcriber:
             # 말이 없는데 지어낸 듯한 구간 거르기(whisper 기본 기준과 같음)
             if s.no_speech_prob > 0.6 and s.avg_logprob < -1.0:
                 continue
-            ws = [Word(offset + w.start, offset + w.end, w.word) for w in (s.words or [])]
+            ws = [Word(offset + w.start, offset + w.end, w.word, float(getattr(w, 'probability', 1.0)))
+                  for w in (s.words or [])]
             out.append(Segment(offset + s.start, offset + s.end, text, lang, ws))
         return out
 
     def transcribe_file(self, wav16k: Path, speech: list[tuple[float, float]], language: str | None,
                         words: bool, progress: Callable[[float], None] | None = None,
                         cancel: Callable[[], bool] | None = None,
-                        pack_seconds: float = PACK_SECONDS) -> list[Segment]:
+                        pack_seconds: float = PACK_SECONDS,
+                        runs: list | None = None) -> list[Segment]:
         """말소리 구간만 이어 붙여(무음 제거) 묶음 단위로 글로 옮긴 뒤, 원래 시각으로 되돌립니다.
 
         whisper 는 30초 창 단위로 계산하므로, 무음이 많은 트랙(내가 듣고만 있는 마이크 등)을
@@ -105,12 +159,15 @@ class Transcriber:
         """
         out: list[Segment] = []
         total = sum(b - a for a, b in speech) or 1.0
-        self.last_lang_stats = {}
-        if language is None:
+        if runs is not None:  # 언어 판별을 다른(가벼운) 모델로 미리 한 경우(R4)
+            base = 0.0
+        elif language is None:
+            self.last_lang_stats = {}
             runs = self.detect_language_runs(wav16k, speech, cancel=cancel,
                                              progress=(lambda f: progress(f * LID_SHARE)) if progress else None)
             base = LID_SHARE
         else:
+            self.last_lang_stats = {}
             runs = [(language, list(speech))]
             base = 0.0
         done = 0.0
@@ -223,7 +280,7 @@ class TimeMap:
             for i, ws in groups:
                 if not ws:
                     continue
-                ows = [Word(self.to_orig(w.start, i), self.to_orig(w.end, i), w.text) for w in ws]
+                ows = [Word(self.to_orig(w.start, i), self.to_orig(w.end, i), w.text, w.prob) for w in ws]
                 text = "".join(w.text for w in ows).strip()
                 if text:
                     out.append(Segment(ows[0].start, ows[-1].end, text, s.lang, ows))

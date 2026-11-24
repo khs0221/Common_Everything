@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import models
+from . import models, sysinfo
 from .audio_io import TARGET_SR, read_all
 from .paths import native_path
 
@@ -33,7 +33,7 @@ def make_diarizer(num_speakers: int | None = None, threshold: float = DEFAULT_TH
                   threads: int | None = None):
     import sherpa_onnx
 
-    threads = threads or max(1, min(8, (os.cpu_count() or 4)))
+    threads = threads or sysinfo.compute_threads()
     cfg = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
