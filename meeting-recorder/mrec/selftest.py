@@ -70,12 +70,18 @@ def run(out_path: str | None = None) -> int:
         _check(results, "모델 경로(C++ 라이브러리용)", paths.path_is_safe_for_native(mdir),
                paths.native_path(mdir))
 
+        # exe 에서는 화면 부품이 빠졌는지 확인(필수). 개발 환경(파이썬 직접 실행)에서는 tkinter 가
+        # 없을 수 있어 참고로만 적습니다(시험 환경마다 결과가 달라지지 않게, 감사 F10).
         try:
             import tkinter  # noqa: F401
 
             _check(results, "화면(tkinter) 포함", True)
         except Exception as e:
-            _check(results, "화면(tkinter) 포함", False, repr(e))
+            if getattr(sys, "frozen", False):
+                _check(results, "화면(tkinter) 포함", False, repr(e))
+            else:
+                results.append({"name": "화면(tkinter) 포함(참고: 개발 환경)", "ok": True,
+                                "detail": f"tkinter 없음: {e!r}"})
 
         if os.name == "nt":
             # 묶음에 빠졌는지(ImportError)만 실패로 봅니다. CI 컴퓨터에는 소리 장치가 없어

@@ -20,6 +20,8 @@ NEAREST_TURN_S = 1.0   # 단어가 어느 구간에도 안 걸리면 이 거리 
 SENTENCE_GAP_S = 1.5   # 단어 사이가 이만큼 비면 문장이 끝난 것으로 봄
 MIN_SPLIT_WORDS = 3    # 한 문장 안에서 이 개수·시간 이상 다른 사람 말이 이어져야 나눔
 MIN_SPLIT_S = 1.0
+MAX_UTTERANCE_S = 60.0       # 한 줄(한 발언)의 최대 길이
+MAX_UTTERANCE_CHARS = 600
 
 
 @dataclass
@@ -189,10 +191,16 @@ def mic_utterances(segments: list[Segment]) -> list[Utterance]:
 
 
 def join_utterances(utts: list[Utterance], gap: float = JOIN_GAP_S) -> list[Utterance]:
-    """시간순으로 놓고, 같은 사람이 gap 초 안에 이어 말한 것을 한 발언으로 묶습니다."""
+    """시간순으로 놓고, 같은 사람이 gap 초 안에 이어 말한 것을 한 발언으로 묶습니다.
+
+    한 발언이 MAX_UTTERANCE_S 초 또는 MAX_UTTERANCE_CHARS 자를 넘으면 새 줄(새 시각)로 시작합니다
+    (긴 독백이 한 줄·한 시각으로 뭉치지 않게, 감사 F11).
+    """
     out: list[Utterance] = []
     for u in sorted(utts, key=lambda u: (u.start, u.end)):
-        if out and out[-1].speaker == u.speaker and u.start - out[-1].end <= gap:
+        if (out and out[-1].speaker == u.speaker and u.start - out[-1].end <= gap
+                and u.end - out[-1].start <= MAX_UTTERANCE_S
+                and len(out[-1].text) + 1 + len(u.text) <= MAX_UTTERANCE_CHARS):
             prev = out[-1]
             prev.end = max(prev.end, u.end)
             prev.text = f"{prev.text} {u.text}".strip()

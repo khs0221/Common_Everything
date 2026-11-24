@@ -97,3 +97,13 @@ def test_speaker_boundary_follows_sentence_end():
                                             (2.3, 2.6, " can"), (2.7, 3.0, " help.")))
     out = assign_loop_segments([seg], turns)
     assert [(u.speaker, u.text) for u in out] == [("spk1", "Great. Thanks."), ("spk2", "I can help.")]
+
+
+def test_long_monologue_is_split_into_lines():
+    utts = [Utterance(i * 5.0, i * 5.0 + 4.5, "spk1", f"sentence number {i}.") for i in range(40)]  # 200초 독백
+    out = join_utterances(utts)
+    assert len(out) >= 4
+    assert all(u.end - u.start <= 60.0 for u in out)
+    assert " ".join(u.text for u in out) == " ".join(u.text for u in utts)
+    many = [Utterance(i * 0.5, i * 0.5 + 0.4, "spk1", "w" * 100) for i in range(20)]  # 글자 수 상한
+    assert all(len(u.text) <= 600 for u in join_utterances(many))
