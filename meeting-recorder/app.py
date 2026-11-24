@@ -33,20 +33,41 @@ def main(argv: list[str] | None = None) -> int:
     if args.selftest:
         had_console = sys.stdout is not None
         _fix_std_streams()
-        from mrec import selftest
-
         out = args.selftest_out
         if not out and not had_console:
-            from mrec.paths import app_dir
+            out = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "selftest_result.json")
+        try:
+            from mrec import selftest
 
-            out = str(app_dir() / "selftest_result.json")
-        return selftest.run(out)
+            return selftest.run(out)
+        except BaseException:  # 창 모드에서 오류 창이 떠 CI 가 멈추지 않게, 파일로 남기고 끝냄
+            import json
+            import traceback
+
+            if out:
+                with open(out, "w", encoding="utf-8") as f:
+                    json.dump({"ok": False, "fatal": traceback.format_exc()[-4000:]}, f, ensure_ascii=False)
+            return 2
     _fix_std_streams()
     if args.fake_devices:
         os.environ["MREC_FAKE_DEVICES"] = "1"
-    from mrec import gui
+    try:
+        from mrec import gui
 
-    return gui.main()
+        return gui.main()
+    except Exception:
+        import logging
+        import traceback
+
+        logging.getLogger("mrec").exception("예상하지 못한 오류")
+        try:
+            from tkinter import messagebox
+
+            messagebox.showerror("회의 녹음·기록", "예상하지 못한 오류로 프로그램을 닫습니다.\n"
+                                 "녹음 파일은 저장 폴더에 남아 있습니다.\n\n" + traceback.format_exc()[-800:])
+        except Exception:
+            pass
+        return 1
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from typing import Callable, Protocol
 import numpy as np
 
 BLOCK_SECONDS = 0.1
+WASAPI_BUFFER_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,32 @@ def _init_com_for_thread() -> None:
         pass
 
 
+def _run_in_mta(fn, *args, timeout: float = 30.0):
+    """윈도우 COM(소리 장치)을 다루는 일을 별도 스레드에서 합니다.
+
+    soundcard 는 불러오는 스레드를 COM 다중 스레드(MTA)로 초기화합니다. 화면(tkinter)의 주
+    스레드가 MTA 가 되면 파일 선택 창(단일 스레드 COM 필요)이 오작동할 수 있어, 주 스레드에서는
+    soundcard 를 불러오거나 부르지 않습니다.
+    """
+    box: dict = {}
+
+    def work():
+        _init_com_for_thread()
+        try:
+            box["r"] = fn(*args)
+        except BaseException as e:  # 호출한 쪽에서 다시 던짐
+            box["e"] = e
+
+    t = threading.Thread(target=work, name="audio-com", daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError("소리 장치가 응답하지 않습니다")
+    if "e" in box:
+        raise box["e"]
+    return box.get("r")
+
+
 class _SoundcardSource:
     """soundcard 의 recorder 를 감싼 조각 읽기."""
 
@@ -68,7 +95,8 @@ class _SoundcardSource:
         last_err = None
         for sr in self.RATES:
             try:
-                rec = mic_obj.recorder(samplerate=sr, channels=1, blocksize=int(sr * BLOCK_SECONDS))
+                # blocksize 는 WASAPI 버퍼 길이(0.5초). 읽기는 0.1초씩 합니다.
+                rec = mic_obj.recorder(samplerate=sr, channels=1, blocksize=int(sr * WASAPI_BUFFER_SECONDS))
                 rec.__enter__()
             except Exception as e:  # 장치가 이 주파수를 거부
                 last_err = e
@@ -97,33 +125,44 @@ class SoundcardBackend:
     """윈도우 실제 장치. (리눅스 컨테이너에서는 검증하지 못했습니다.)"""
 
     def __init__(self):
-        import soundcard  # noqa: F401  늦게 불러와 장치 없는 환경에서도 프로그램이 뜨게 함
+        # 늦게, 그리고 별도 스레드에서 불러옵니다(위 _run_in_mta 설명 참고).
+        self._sc = _run_in_mta(lambda: __import__("soundcard"))
 
-        self._sc = soundcard
-
-    def list_microphones(self) -> list[DeviceInfo]:
+    def _list_mics(self) -> list[DeviceInfo]:
         try:
             default = self._sc.default_microphone().id
         except Exception:
             default = None
         return [DeviceInfo(m.id, m.name, m.id == default) for m in self._sc.all_microphones(include_loopback=False)]
 
-    def list_speakers(self) -> list[DeviceInfo]:
+    def _list_spks(self) -> list[DeviceInfo]:
         try:
             default = self._sc.default_speaker().id
         except Exception:
             default = None
         return [DeviceInfo(s.id, s.name, s.id == default) for s in self._sc.all_speakers()]
 
-    def open_microphone(self, device_id: str | None) -> Source:
+    def list_microphones(self) -> list[DeviceInfo]:
+        return _run_in_mta(self._list_mics)
+
+    def list_speakers(self) -> list[DeviceInfo]:
+        return _run_in_mta(self._list_spks)
+
+    def _open_mic(self, device_id: str | None) -> Source:
         mic = self._sc.default_microphone() if not device_id else self._sc.get_microphone(device_id)
         return _SoundcardSource(mic)
 
-    def open_loopback(self, speaker_id: str | None) -> Source:
+    def _open_loop(self, speaker_id: str | None) -> Source:
         if not speaker_id:
             speaker_id = self._sc.default_speaker().id
         lb = self._sc.get_microphone(speaker_id, include_loopback=True)
         return _SoundcardSource(lb)
+
+    def open_microphone(self, device_id: str | None) -> Source:
+        return _run_in_mta(self._open_mic, device_id)
+
+    def open_loopback(self, speaker_id: str | None) -> Source:
+        return _run_in_mta(self._open_loop, speaker_id)
 
 
 # ---------------------------------------------------------------- 시험용 장치

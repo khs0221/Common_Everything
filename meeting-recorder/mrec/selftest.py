@@ -78,8 +78,10 @@ def run(out_path: str | None = None) -> int:
             _check(results, "화면(tkinter) 포함", False, repr(e))
 
         if os.name == "nt":
+            # 묶음에 빠졌는지(ImportError)만 실패로 봅니다. CI 컴퓨터에는 소리 장치가 없어
+            # 장치 관련 오류가 날 수 있는데, 그것은 참고로만 적습니다.
             try:
-                import soundcard  # noqa: F401
+                import soundcard
 
                 _check(results, "soundcard 포함", True)
                 try:
@@ -89,8 +91,10 @@ def run(out_path: str | None = None) -> int:
                                     "detail": f"마이크 {n_mic}, 스피커 {n_spk}"})
                 except Exception as e:
                     results.append({"name": "장치 목록(참고)", "ok": True, "detail": repr(e)})
-            except Exception as e:
+            except ImportError as e:
                 _check(results, "soundcard 포함", False, repr(e))
+            except Exception as e:
+                results.append({"name": "soundcard 불러오기(참고: 장치 없는 환경)", "ok": True, "detail": repr(e)})
 
         try:
             ok, detail = _fake_recording(tmp / "rec")

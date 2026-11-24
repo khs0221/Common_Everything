@@ -137,3 +137,26 @@ def test_open_failure_creates_no_folder(tmp_path):
         pass
     assert list(tmp_path.iterdir()) == []
     assert not rec.running
+
+
+def test_disk_write_failure_is_reported_and_stop_finishes(tmp_path):
+    rec = Recorder(FakeBackend(loop=lambda: FakeSource(SR, tone(660, 0.2, SR))))
+    rec.start(tmp_path, None, None)
+    w = rec.tracks["mic"].writer
+    orig = w.write
+    calls = {"n": 0}
+
+    def flaky(x):
+        calls["n"] += 1
+        if calls["n"] > 3:
+            raise OSError(28, "No space left on device")
+        return orig(x)
+
+    w.write = flaky
+    time.sleep(1.0)
+    assert rec.errors()["mic"].startswith("디스크")
+    t = time.monotonic()
+    res = rec.stop()
+    assert time.monotonic() - t < 5
+    assert res.stats["loop"]["error"] is None
+    assert sf.info(str(res.loop_path)).frames >= int(0.9 * SR)

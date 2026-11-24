@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import time
 from dataclasses import dataclass, field
@@ -63,7 +64,15 @@ class AlignedTrack:
         self.stats = TrackStats(samplerate=self.sr)
         self.level = -90.0
         self._lock = threading.Lock()
+        # 장치 읽기와 디스크 쓰기를 다른 스레드로 나눕니다. 디스크가 잠깐 느려져도(fsync 등)
+        # 장치 버퍼를 제때 비워 소리가 빠지지 않게 하기 위함입니다.
+        self._q: queue.Queue = queue.Queue()
         self.thread = threading.Thread(target=self._run, name=f"rec-{name}", daemon=True)
+        self.writer_thread = threading.Thread(target=self._write_loop, name=f"wr-{name}", daemon=True)
+
+    def start(self) -> None:
+        self.writer_thread.start()
+        self.thread.start()
 
     def write_block(self, block: np.ndarray, now: float) -> None:
         """조각을 시각에 맞춰 씁니다(시험에서 직접 부를 수 있게 분리)."""
@@ -82,27 +91,49 @@ class AlignedTrack:
             if lead > self.stats.max_lead_s:
                 self.stats.max_lead_s = lead
             self.stats.frames_written = self.writer.frames_written
-            self.level = level_dbfs(block)
 
     def _run(self) -> None:
+        """장치 읽기 스레드: 조각과 도착 시각을 줄에 넣기만 합니다."""
         try:
-            while not self.stop_event.is_set():
+            while True:
                 block = self.source.read()
-                if self.stop_event.is_set():
-                    # 중지 직후 도착한 조각도 씁니다(마지막 말 끝 보존).
-                    if block.size:
-                        self.write_block(block, self.clock())
-                    break
+                now = self.clock()
                 if block.size:
-                    self.write_block(block, self.clock())
+                    self.level = level_dbfs(block)
+                    self._q.put((block, now))  # 중지 직후 도착한 조각도 씁니다(마지막 말 끝 보존)
+                if self.stop_event.is_set():
+                    break
         except Exception as e:  # 장치 뽑힘 등: 기록만 하고 나머지 트랙은 계속
             self.stats.error = f"{type(e).__name__}: {e}"
             self.level = -90.0
         finally:
+            self._q.put(None)
             try:
                 self.source.close()
             except Exception:
                 pass
+
+    def _write_loop(self) -> None:
+        """디스크 쓰기 스레드."""
+        failed = False
+        while True:
+            item = self._q.get()
+            if item is None:
+                break
+            if failed:
+                continue  # 쓰기 실패 뒤에는 줄만 비웁니다(메모리 증가 방지)
+            try:
+                self.write_block(*item)
+            except OSError as e:  # 디스크 가득 참 등
+                self.stats.error = f"디스크 쓰기 오류: {e}"
+                failed = True
+
+    def finish(self, timeout: float) -> None:
+        """읽기 스레드가 끝나길 기다리고, 줄에 남은 조각을 모두 쓴 뒤 돌아옵니다."""
+        self.thread.join(timeout)
+        if self.thread.is_alive():  # 장치가 응답하지 않음: 쓰기 스레드만 끝냄
+            self._q.put(None)
+        self.writer_thread.join(max(timeout, 10.0))
 
     def pad_to_seconds(self, seconds: float) -> None:
         with self._lock:
@@ -175,7 +206,7 @@ class Recorder:
         }
         self._write_info(finished=False)
         for t in self.tracks.values():
-            t.thread.start()
+            t.start()
         self.running = True
         return self.folder
 
@@ -195,12 +226,18 @@ class Recorder:
         self._stop.set()
         # 장치는 각 녹음 스레드가 스스로 닫습니다(읽는 도중 다른 스레드에서 닫지 않음).
         for t in self.tracks.values():
-            t.thread.join(join_timeout)
+            t.finish(join_timeout)
         # 두 트랙을 같은 길이로 맞춥니다.
         longest = max([end] + [t.writer.seconds for t in self.tracks.values()])
         for t in self.tracks.values():
-            t.pad_to_seconds(longest)
-            t.close()
+            try:
+                t.pad_to_seconds(longest)
+            except OSError as e:
+                t.stats.error = t.stats.error or f"디스크 쓰기 오류: {e}"
+            try:
+                t.close()
+            except OSError as e:
+                t.stats.error = t.stats.error or f"파일 닫기 오류: {e}"
         self.running = False
         self._write_info(finished=True, seconds=longest)
         assert self.folder is not None

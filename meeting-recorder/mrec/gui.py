@@ -267,9 +267,12 @@ class App:
                     self.silent_since[key] = now
                 elif self.silent_since[key] and now - self.silent_since[key] > SILENT_WARN_S:
                     warns.append(f"{label}가 1분 넘게 조용합니다. 장치 선택을 확인해 주십시오.")
-            errs = rec.errors()
-            for k in errs:
-                warns.append(("마이크" if k == "mic" else "스피커") + " 장치 오류로 이 트랙은 무음으로 채우고 있습니다.")
+            for k, e in rec.errors().items():
+                who = "마이크" if k == "mic" else "스피커"
+                if e.startswith("디스크"):
+                    warns.append(f"{who} 녹음 파일을 쓰지 못하고 있습니다. 저장 공간을 확인해 주십시오.")
+                else:
+                    warns.append(f"{who} 장치 오류로 이 트랙은 무음으로 채우고 있습니다.")
             self.rec_warn.set(" ".join(warns))
         self._drain_queue()
         self.root.after(200, self._tick)
@@ -467,11 +470,14 @@ class NamesDialog:
 def main() -> int:
     sysinfo.setup_logging()
     log.info("시작: 버전 %s", __import__("mrec").__version__)
+    if os.name == "nt":
+        try:  # 고해상도 화면에서 글자가 흐리지 않게
+            import ctypes
+
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
     root = tk.Tk()
-    try:
-        root.tk.call("tk", "scaling", root.winfo_fpixels("1i") / 72.0)
-    except tk.TclError:
-        pass
     App(root)
     root.mainloop()
     return 0
