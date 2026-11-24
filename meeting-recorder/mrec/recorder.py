@@ -348,6 +348,7 @@ class Recorder:
         # 2) 출발 시각 = 두 스트림 중 먼저 시작한 시각. 늦은 쪽은 앞을 무음으로 채웁니다.
         self.t0 = min(t.started_at for t in self.tracks.values())
         self.started_at = datetime.now()
+        self.folder = None
         try:
             self.folder = new_meeting_folder(output_root, self.started_at)
             self.tracks["mic"].attach_writer(self.folder / MIC_FILE, self.t0)
@@ -375,8 +376,31 @@ class Recorder:
                 t.close()  # 만들어진 파일이 있으면 닫음
             except OSError:
                 pass
+        self._remove_partial_folder()
         self.tracks = {}
         self.running = False
+
+    def _remove_partial_folder(self) -> None:
+        """시작 실패로 남은 빈 회의 폴더와, 소리 없이 머리말만 있는 우리 파일만 지웁니다(감사 E3).
+        폴더에 다른 파일이 있거나 소리가 든 wav 가 있으면 아무것도 지우지 않습니다."""
+        folder = self.folder
+        if folder is None or not folder.is_dir():
+            return
+        ours = {MIC_FILE, LOOP_FILE, INFO_FILE}
+        try:
+            names = {p.name for p in folder.iterdir()}
+            if names - ours:
+                return
+            for name in (MIC_FILE, LOOP_FILE):
+                p = folder / name
+                if p.is_file() and p.stat().st_size > 44:  # 44바이트 = 소리 없는 WAV 머리말
+                    return
+            for name in names:
+                (folder / name).unlink()
+            folder.rmdir()
+            self.folder = None
+        except OSError:
+            pass
 
     def elapsed(self) -> float:
         return self.clock() - self.t0 if self.running else 0.0
