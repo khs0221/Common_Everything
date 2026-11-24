@@ -1,0 +1,55 @@
+name: 회의 녹음 프로그램 오래된 묶음 정리
+
+# 이 프로젝트의 exe 묶음(이름이 정확히 MeetingRecorder-windows 인 아티팩트)만 다룹니다.
+# 만들어진 순서로 최신 2개는 남기고 나머지를 지웁니다. 다른 아티팩트는 건드리지 않습니다.
+on:
+  schedule:
+    - cron: "17 3 * * 1"   # 매주 월요일 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true 면 지울 목록만 보여 주고 지우지 않습니다"
+        required: false
+        default: "false"
+
+permissions:
+  actions: write
+
+concurrency:
+  group: meeting-recorder-artifact-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 최신 2개만 남기고 정리
+        uses: actions/github-script@v7
+        env:
+          ARTIFACT_NAME: MeetingRecorder-windows
+          KEEP: "2"
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        with:
+          script: |
+            const name = process.env.ARTIFACT_NAME;
+            const keep = parseInt(process.env.KEEP, 10);
+            const dryRun = process.env.DRY_RUN === 'true';
+            const all = await github.paginate(github.rest.actions.listArtifactsForRepo, {
+              owner: context.repo.owner, repo: context.repo.repo, name, per_page: 100,
+            });
+            // 이름이 정확히 같은 것만(API 의 name 필터 + 한 번 더 확인), 만료된 것은 제외
+            const items = all.filter(a => a.name === name && !a.expired)
+                             .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            core.info(`${name}: ${items.length}개 (최신 ${keep}개 보존)`);
+            items.slice(0, keep).forEach(a => core.info(`보존: #${a.id} ${a.created_at}`));
+            const drop = items.slice(keep);
+            for (const a of drop) {
+              core.info(`${dryRun ? '지울 예정(시험)' : '삭제'}: #${a.id} ${a.created_at} ${Math.round(a.size_in_bytes / 1048576)}MB`);
+              if (!dryRun) {
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner, repo: context.repo.repo, artifact_id: a.id,
+                });
+              }
+            }
+            core.info(`끝: ${dryRun ? '시험 실행' : drop.length + '개 삭제'}`);
