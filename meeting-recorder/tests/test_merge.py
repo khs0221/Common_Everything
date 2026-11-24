@@ -13,6 +13,23 @@ def test_relabel_by_first_appearance():
     assert [s for _, _, s in relabel_turns(turns)] == ["spk1", "spk2", "spk2"]
 
 
+def test_speaker_change_without_punctuation_is_split_when_long():
+    turns = [Turn(0.0, 2.0, 0), Turn(2.0, 5.0, 1)]
+    seg = Segment(0.0, 5.0, "x", "en", words((0.1, 0.5, " we"), (0.6, 1.0, " should"), (1.1, 1.9, " start"),
+                                            (2.1, 2.5, " yes"), (2.6, 3.0, " i"), (3.1, 3.6, " agree")))
+    out = assign_loop_segments([seg], turns)
+    assert [(u.speaker, u.text) for u in out] == [("spk1", "we should start"), ("spk2", "yes i agree")]
+
+
+def test_trailing_word_of_previous_segment_joins_next_sentence():
+    """whisper 구간이 '… March. I' / 'can prepare …' 로 잘려도 'I' 는 다음 사람 문장에 붙어야 합니다."""
+    turns = [Turn(0.0, 3.0, 0), Turn(3.6, 7.0, 1)]
+    s1 = Segment(0.0, 3.4, "x", "en", words((0.5, 1.0, " In"), (1.1, 2.8, " March."), (2.9, 3.4, " I")))
+    s2 = Segment(3.6, 7.0, "y", "en", words((3.7, 4.0, " can"), (4.1, 4.8, " prepare"), (4.9, 5.5, " slides.")))
+    out = assign_loop_segments([s1, s2], turns)
+    assert [(u.speaker, u.text) for u in out] == [("spk1", "In March."), ("spk2", "I can prepare slides.")]
+
+
 def test_speaker_change_inside_one_segment_is_split():
     turns = [Turn(0.0, 2.0, 0), Turn(2.1, 4.0, 1)]
     seg = Segment(0.0, 4.0, "Hello there. Hi back.", "en",
@@ -24,7 +41,7 @@ def test_speaker_change_inside_one_segment_is_split():
 
 def test_unassigned_words_follow_neighbors():
     turns = [Turn(0.0, 1.0, 0), Turn(10.0, 11.0, 1)]
-    seg = Segment(0.0, 3.0, "a b c", "en", words((0.2, 0.4, " a"), (2.5, 2.7, " b"), (2.8, 2.9, " c")))
+    seg = Segment(0.0, 3.0, "a b c", "en", words((0.2, 0.4, " a"), (0.9, 1.0, " b"), (1.2, 1.4, " c")))
     out = assign_loop_segments([seg], turns)
     assert [(u.speaker, u.text) for u in out] == [("spk1", "a b c")]
 
@@ -72,3 +89,11 @@ def test_speakers_in_and_representative():
     assert [r.text for r in reps] == ["a much longer sentence here", "mid one"]
     long = [Utterance(0, 1, "spk1", "w" * 500)]
     assert representative(long, "spk1")[0].text.endswith("…")
+
+
+def test_speaker_boundary_follows_sentence_end():
+    turns = [Turn(0.0, 2.05, 0), Turn(2.05, 5.0, 1)]
+    seg = Segment(0.0, 5.0, "x", "en", words((0.1, 0.5, " Great."), (0.6, 1.9, " Thanks."), (1.95, 2.1, " I"),
+                                            (2.3, 2.6, " can"), (2.7, 3.0, " help.")))
+    out = assign_loop_segments([seg], turns)
+    assert [(u.speaker, u.text) for u in out] == [("spk1", "Great. Thanks."), ("spk2", "I can help.")]

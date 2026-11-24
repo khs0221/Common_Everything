@@ -40,3 +40,27 @@ def test_timemap_without_words():
     tm = TimeMap([(10.0, 2.0), (50.0, 3.0)])
     out = tm.restore(Segment(0.5, 1.5, "hi", "en", []))
     assert len(out) == 1 and (out[0].start, out[0].end) == (10.5, 11.5)
+
+
+def test_rebalance_moves_dangling_words_to_sentence():
+    from mrec.transcribe import rebalance
+
+    W = lambda t: Word(0, 0, t)  # noqa: E731
+    a, b = rebalance([W(" March."), W(" I")], [W(" can"), W(" go.")])
+    assert [w.text for w in a] == [" March."] and [w.text for w in b] == [" I", " can", " go."]
+    a, b = rebalance([W(" the"), W(" customer")], [W(" workshop."), W(" Next")])
+    assert [w.text for w in a] == [" the", " customer", " workshop."] and [w.text for w in b] == [" Next"]
+    a, b = rebalance([W(" done.")], [W(" Next")])  # 이미 문장 끝: 그대로
+    assert len(a) == 1 and len(b) == 1
+    a, b = rebalance([W(" a"), W(" b"), W(" c"), W(" d")], [W(" e"), W(" f"), W(" g"), W(" h")])  # 부호 없음
+    assert len(a) == 4 and len(b) == 4
+
+
+def test_timemap_junction_word_follows_sentence():
+    tm = TimeMap([(10.0, 2.0), (50.0, 3.0)])
+    # " I" 의 가운데(1.95)는 첫 구간이지만, 문장은 두 번째 구간에서 시작
+    seg = Segment(0.0, 3.0, "March. I can", "en",
+                  [Word(1.0, 1.6, " March."), Word(1.8, 2.1, " I"), Word(2.2, 2.6, " can")])
+    out = tm.restore(seg)
+    assert [o.text for o in out] == ["March.", "I can"]
+    assert out[1].start == 50.0  # 두 번째 구간 시작으로 자름

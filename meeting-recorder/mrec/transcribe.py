@@ -168,17 +168,50 @@ class TimeMap:
             groups: list[tuple[int, list[Word]]] = []
             for w in s.words:
                 i = self.index((w.start + w.end) / 2)  # 단어의 시작·끝을 같은 구간 기준으로
-                ow = Word(self.to_orig(w.start, i), self.to_orig(w.end, i), w.text)
                 if groups and groups[-1][0] == i:
-                    groups[-1][1].append(ow)
+                    groups[-1][1].append(w)
                 else:
-                    groups.append((i, [ow]))
+                    groups.append((i, [w]))
+            # 구간 경계 근처 단어의 시각은 흔들리므로, 문장 부호를 보고 경계를 바로잡습니다.
+            for k in range(len(groups) - 1):
+                a, b = rebalance(groups[k][1], groups[k + 1][1])
+                groups[k] = (groups[k][0], a)
+                groups[k + 1] = (groups[k + 1][0], b)
             out = []
-            for _, ws in groups:
-                text = "".join(w.text for w in ws).strip()
+            for i, ws in groups:
+                if not ws:
+                    continue
+                ows = [Word(self.to_orig(w.start, i), self.to_orig(w.end, i), w.text) for w in ws]
+                text = "".join(w.text for w in ows).strip()
                 if text:
-                    out.append(Segment(ws[0].start, ws[-1].end, text, s.lang, ws))
+                    out.append(Segment(ows[0].start, ows[-1].end, text, s.lang, ows))
             return out
         i = self.index(s.start)
         j = self.index(max(s.start, s.end - 1e-3))
         return [Segment(self.to_orig(s.start, i), self.to_orig(s.end, j), s.text, s.lang, [])]
+
+
+SENTENCE_END = (".", "?", "!", "。", "？", "！")
+MAX_MOVE_WORDS = 2
+
+
+def ends_sentence(text: str) -> bool:
+    return text.strip().rstrip("\"')]»”’").endswith(SENTENCE_END)
+
+
+def rebalance(a: list, b: list) -> tuple[list, list]:
+    """이웃한 두 단어 묶음(a 다음 b)의 경계를 문장 부호에 맞춥니다.
+
+    예) a = "…in March. I", b = "can prepare…" → a = "…in March.", b = "I can prepare…"
+        a = "…the customer", b = "workshop. Next…" → a = "…the customer workshop.", b = "Next…"
+    옮기는 단어는 최대 MAX_MOVE_WORDS 개이고, 어느 쪽도 비지 않게 합니다.
+    """
+    if not a or not b or ends_sentence(a[-1].text):
+        return a, b
+    for k in range(1, MAX_MOVE_WORDS + 1):
+        if len(a) > k and ends_sentence(a[-k - 1].text):
+            return a[:-k], a[-k:] + b
+    for k in range(1, MAX_MOVE_WORDS + 1):
+        if len(b) > k and ends_sentence(b[k - 1].text):
+            return a + b[:k], b[k:]
+    return a, b
