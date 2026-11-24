@@ -15,7 +15,9 @@ CoInitializeEx 를 부르고(mediafoundation.py 116줄 `_com = _COMLibrary()`), 
 """
 from __future__ import annotations
 
+import importlib
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -83,11 +85,11 @@ def com_uninit(initialized: bool) -> None:
 
 
 def _run_in_mta(fn, *args, timeout: float = 30.0):
-    """윈도우 COM(소리 장치)을 다루는 일을 별도 스레드에서 합니다.
+    """윈도우 COM(소리 장치)을 다루는 일을 COM 을 초기화한 별도 스레드에서 합니다(목록 읽기 등).
 
-    soundcard 는 불러오는 스레드를 COM 다중 스레드(MTA)로 초기화합니다. 화면(tkinter)의 주
-    스레드가 MTA 가 되면 파일 선택 창(단일 스레드 COM 필요)이 오작동할 수 있어, 주 스레드에서는
-    soundcard 를 불러오거나 부르지 않습니다.
+    화면(tkinter)의 주 스레드가 MTA 가 되면 파일 선택 창(단일 스레드 COM 필요)이 오작동할 수 있어,
+    주 스레드에서는 soundcard 를 부르지 않습니다. soundcard 를 '불러오는' 일은 여기서 하지 않습니다
+    (먼저 COM 을 초기화하면 soundcard 의 불러오기가 실패함, import_audio_module 참고).
     """
     box: dict = {}
 
@@ -148,12 +150,73 @@ class _SoundcardSource:
             pass
 
 
+_IMPORT_LOCK = threading.Lock()
+
+
+def _release_import_thread_com(module) -> None:
+    """soundcard 가 불러올 때 이 스레드에서 연 COM 을 같은 스레드에서 닫습니다.
+
+    soundcard 는 모듈을 불러올 때만 CoInitializeEx 를 부르고, 닫는 것은 모듈이 사라질 때
+    (`_COMLibrary.__del__`, 보통 프로그램 종료 때 주 스레드)입니다. 짝이 다른 스레드에서 맞지 않게
+    여기서 같은 스레드에서 닫고 표시를 내립니다. 장치 객체는 id 문자열만 갖고 COM 객체는 부를 때마다
+    새로 만들므로(mediafoundation.py 209~236줄 `_DeviceEnumerator`, 343~350줄 `_Device`),
+    불러온 스레드의 COM 이 내려가도 COM 을 초기화한 다른 스레드에서 목록 읽기·열기가 됩니다.
+    """
+    if os.name != "nt":
+        return
+    try:
+        com = sys.modules[module.__name__ + ".mediafoundation"]._com
+        if getattr(com, "com_loaded", False):
+            import ctypes
+
+            ctypes.windll.ole32.CoUninitialize()
+            com.com_loaded = False
+    except Exception:
+        pass
+
+
+def import_audio_module(name: str = "soundcard", timeout: float = 30.0):
+    """soundcard 를 'COM 을 아직 초기화하지 않은' 새 스레드에서 불러옵니다(R2 원인 수정).
+
+    soundcard 는 불러올 때 CoInitializeEx 를 부르고, 결과가 S_OK(0)가 아니면 예외를 냅니다
+    (mediafoundation.py 39~67줄 `_COMLibrary`, 78~105줄 `check_error`). 이미 COM 을 초기화한 스레드에서
+    불러오면 S_FALSE(1)를 받아 `RuntimeError('Error 0x100000001')` 로 불러오기 자체가 실패합니다.
+    그래서 이 스레드에서는 com_init() 을 부르지 않습니다. 주 스레드(화면)에서도 불러오지 않습니다
+    (주 스레드가 MTA 가 되면 파일 선택 창이 오작동할 수 있음).
+
+    불러오기가 실패하면 파이썬이 반쯤 불러온 모듈을 sys.modules 에서 지우므로, 다시 부르면
+    처음부터 다시 불러옵니다.
+    """
+    with _IMPORT_LOCK:
+        mod = sys.modules.get(name)
+        if mod is not None:
+            return mod
+        box: dict = {}
+
+        def work():
+            try:
+                m = importlib.import_module(name)
+                _release_import_thread_com(m)
+                box["m"] = m
+            except BaseException as e:  # 호출한 쪽에서 다시 던짐
+                box["e"] = e
+
+        t = threading.Thread(target=work, name="audio-import", daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            raise TimeoutError("소리 장치 모듈을 불러오는 데 시간이 너무 오래 걸립니다")
+        if "e" in box:
+            raise box["e"]
+        return box["m"]
+
+
 class SoundcardBackend:
     """윈도우 실제 장치. (리눅스 컨테이너에서는 검증하지 못했습니다.)"""
 
     def __init__(self):
-        # 늦게, 그리고 별도 스레드에서 불러옵니다(위 _run_in_mta 설명 참고).
-        self._sc = _run_in_mta(lambda: __import__("soundcard"))
+        # 늦게, 그리고 COM 을 초기화하지 않은 별도 스레드에서 불러옵니다(import_audio_module 설명).
+        self._sc = import_audio_module("soundcard")
 
     def _list_mics(self) -> list[DeviceInfo]:
         try:
