@@ -3,8 +3,15 @@
 녹음 로직(`recorder.py`)은 이 파일의 `Backend`/`Source` 모양만 압니다.
 - `SoundcardBackend`: 윈도우 실제 장치(soundcard 라이브러리, WASAPI). 마이크와
   스피커 루프백(스피커로 나가는 소리)을 읽습니다.
-- `FakeBackend`: 장치 없는 시험용. 정해진 신호를 실제 시간 흐름에 맞춰 내보내고,
-  루프백처럼 '소리가 없으면 데이터가 안 오는' 상황도 흉내 냅니다.
+- `FakeBackend`: 장치 없는 시험용. 정해진 신호를 실제 시간 흐름에 맞춰 내보냅니다.
+  무음 구간은 실제 soundcard 처럼 0 을 돌려주고(기본), 장치가 멈춘 상황(데이터가 안 옴)·
+  장치 오류·기본 장치 변경·열기 지연도 흉내 낼 수 있습니다.
+
+스레드 규칙(F1): 장치를 여는 것, 읽는 것, 닫는 것은 모두 같은 녹음 스레드에서 하고,
+그 스레드는 시작할 때 COM 을 초기화합니다(`com_init`). soundcard 는 모듈을 불러오는 스레드에서만
+CoInitializeEx 를 부르고(mediafoundation.py 116줄 `_com = _COMLibrary()`), 장치 열기
+(`_audio_client` 의 IMMDevice::Activate, 411~419줄)·읽기(`GetNextPacketSize`, `GetBuffer`,
+685~711줄)에서는 스레드별 초기화를 하지 않기 때문입니다.
 """
 from __future__ import annotations
 
@@ -29,6 +36,8 @@ class DeviceInfo:
 
 class Source(Protocol):
     samplerate: int
+    started_at: float   # 스트림을 시작한 시각(time.monotonic 기준)
+    device_id: str | None
 
     def read(self) -> np.ndarray:
         """모노 float32 조각 1개를 돌려줍니다(데이터가 올 때까지 기다림)."""
@@ -45,17 +54,32 @@ class Backend(Protocol):
 
     def open_loopback(self, speaker_id: str | None) -> Source: ...
 
+    def default_microphone_id(self) -> str | None: ...
 
-def _init_com_for_thread() -> None:
-    """윈도우: 녹음 스레드마다 COM 을 초기화합니다(이미 됐으면 무시)."""
+    def default_speaker_id(self) -> str | None: ...
+
+
+def com_init() -> bool:
+    """윈도우: 지금 스레드의 COM 을 MTA 로 초기화합니다. 끝날 때 com_uninit 을 불러야 하면 True."""
     if os.name != "nt":
-        return
+        return False
     try:
         import ctypes
 
-        ctypes.windll.ole32.CoInitializeEx(None, 0x0)  # COINIT_MULTITHREADED
+        hr = ctypes.windll.ole32.CoInitializeEx(None, 0x0)  # COINIT_MULTITHREADED
+        return hr in (0, 1)  # S_OK, S_FALSE
     except Exception:
-        pass
+        return False
+
+
+def com_uninit(initialized: bool) -> None:
+    if initialized and os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.ole32.CoUninitialize()
+        except Exception:
+            pass
 
 
 def _run_in_mta(fn, *args, timeout: float = 30.0):
@@ -68,11 +92,13 @@ def _run_in_mta(fn, *args, timeout: float = 30.0):
     box: dict = {}
 
     def work():
-        _init_com_for_thread()
+        inited = com_init()
         try:
             box["r"] = fn(*args)
         except BaseException as e:  # 호출한 쪽에서 다시 던짐
             box["e"] = e
+        finally:
+            com_uninit(inited)
 
     t = threading.Thread(target=work, name="audio-com", daemon=True)
     t.start()
@@ -85,13 +111,13 @@ def _run_in_mta(fn, *args, timeout: float = 30.0):
 
 
 class _SoundcardSource:
-    """soundcard 의 recorder 를 감싼 조각 읽기."""
+    """soundcard 의 recorder 를 감싼 조각 읽기. 만든 스레드에서만 읽고 닫아야 합니다."""
 
     # 16kHz 를 먼저 요청하고(WASAPI 자동 변환), 안 되면 장치 기본값 쪽으로 물러납니다.
     RATES = (16000, 48000, 44100)
 
     def __init__(self, mic_obj):
-        _init_com_for_thread()
+        self.device_id = getattr(mic_obj, "id", None)
         last_err = None
         for sr in self.RATES:
             try:
@@ -101,6 +127,7 @@ class _SoundcardSource:
             except Exception as e:  # 장치가 이 주파수를 거부
                 last_err = e
                 continue
+            self.started_at = time.monotonic()  # Start() 직후
             self._rec = rec
             self.samplerate = sr
             self._block = int(sr * BLOCK_SECONDS)
@@ -158,11 +185,18 @@ class SoundcardBackend:
         lb = self._sc.get_microphone(speaker_id, include_loopback=True)
         return _SoundcardSource(lb)
 
+    # 아래 넷은 녹음 스레드(COM 초기화됨)에서 직접 부릅니다.
     def open_microphone(self, device_id: str | None) -> Source:
-        return _run_in_mta(self._open_mic, device_id)
+        return self._open_mic(device_id)
 
     def open_loopback(self, speaker_id: str | None) -> Source:
-        return _run_in_mta(self._open_loop, speaker_id)
+        return self._open_loop(speaker_id)
+
+    def default_microphone_id(self) -> str | None:
+        return self._sc.default_microphone().id
+
+    def default_speaker_id(self) -> str | None:
+        return self._sc.default_speaker().id
 
 
 # ---------------------------------------------------------------- 시험용 장치
@@ -171,45 +205,63 @@ class SoundcardBackend:
 class FakeSource:
     """실제 시간에 맞춰 신호를 내보내는 가짜 장치.
 
-    signal(t0_frame, n) -> n 개 표본. gaps: [(시작초, 끝초)] 구간에는 데이터를 보내지 않고
-    기다립니다(루프백이 무음일 때 WASAPI 가 아무것도 안 보내는 상황 흉내).
+    signal(시작 표본, n) -> n 개 표본.
+    gaps: [(시작초, 끝초)] 무음 구간. gap_mode="zeros"(기본)는 실제 soundcard 처럼 0 을 돌려주고,
+          "stall" 은 데이터를 안 보내고 그 구간 소리를 버립니다(장치가 멈춰 WASAPI 버퍼가 넘친 상황).
     fail_after_s: 이 시간이 지나면 read() 가 예외를 냅니다(장치 뽑힘 흉내).
+    open_delay_s: 장치 열기에 걸리는 시간(만들 때 그만큼 기다림).
     """
 
     def __init__(self, samplerate: int, signal: Callable[[int, int], np.ndarray],
                  gaps: list[tuple[float, float]] | None = None, fail_after_s: float | None = None,
-                 clock: Callable[[], float] = time.monotonic, rate_error: float = 0.0):
+                 clock: Callable[[], float] = time.monotonic, rate_error: float = 0.0,
+                 gap_mode: str = "zeros", open_delay_s: float = 0.0, device_id: str | None = None):
+        if open_delay_s:
+            time.sleep(open_delay_s)
         self.samplerate = samplerate
+        self.device_id = device_id
         self._signal = signal
         self._gaps = gaps or []
+        self._gap_mode = gap_mode
         self._fail_after = fail_after_s
         self._clock = clock
         self._start = clock()
+        self.started_at = self._start
         self._pos = 0  # 지금까지 '장치가 만든' 표본(무음 구간 포함)
         self._block = int(samplerate * BLOCK_SECONDS)
         self._rate = samplerate * (1.0 + rate_error)  # 장치 시계 오차 흉내
         self._closed = threading.Event()
+        self._cancel = threading.Event()
+        self.reader_threads: set[int] = set()
 
     def _in_gap(self, t: float) -> bool:
         return any(a <= t < b for a, b in self._gaps)
 
     def read(self) -> np.ndarray:
-        while not self._closed.is_set():
+        self.reader_threads.add(threading.get_ident())
+        while not (self._closed.is_set() or self._cancel.is_set()):
             elapsed = self._clock() - self._start
             if self._fail_after is not None and elapsed >= self._fail_after:
-                raise OSError("가짜 장치 오류")
+                raise RuntimeError("가짜 장치 오류(장치 없어짐)")
             avail = int(elapsed * self._rate) - self._pos
             if avail >= self._block:
                 t = self._pos / self.samplerate
                 start = self._pos
                 self._pos += self._block
                 if self._in_gap(t):
-                    continue  # 무음 구간: 데이터를 버리고 아무것도 안 보냄
+                    if self._gap_mode == "stall":
+                        continue  # 데이터를 버리고 아무것도 안 보냄
+                    return np.zeros(self._block, dtype=np.float32)
                 return np.asarray(self._signal(start, self._block), dtype=np.float32)
             time.sleep(0.005)
         return np.zeros(0, dtype=np.float32)
 
+    def cancel(self) -> None:
+        """기다리는 read() 를 빈 조각으로 돌려보냅니다(시험용 장치에만 있음)."""
+        self._cancel.set()
+
     def close(self) -> None:
+        self.reader_threads.add(threading.get_ident())
         self._closed.set()
 
 
@@ -222,9 +274,17 @@ def tone(freq: float, amp: float, samplerate: int) -> Callable[[int, int], np.nd
 
 
 class FakeBackend:
+    """가짜 장치 묶음. mic/loop 은 부를 때마다 새 FakeSource 를 만드는 함수(다시 연결 시험용).
+
+    default_mic / default_spk 를 바꾸면 '윈도우 기본 장치가 바뀐' 상황이 됩니다.
+    """
+
     def __init__(self, mic: Callable[[], FakeSource] | None = None, loop: Callable[[], FakeSource] | None = None):
         self._mic = mic or (lambda: FakeSource(16000, tone(440, 0.1, 16000)))
         self._loop = loop or (lambda: FakeSource(16000, tone(660, 0.1, 16000), gaps=[(1.0, 2.0)]))
+        self.default_mic = "fake-mic"
+        self.default_spk = "fake-spk"
+        self.opened: list[tuple[str, str | None, int]] = []  # (종류, 장치 id, 스레드)
 
     def list_microphones(self) -> list[DeviceInfo]:
         return [DeviceInfo("fake-mic", "시험용 마이크", True)]
@@ -232,11 +292,24 @@ class FakeBackend:
     def list_speakers(self) -> list[DeviceInfo]:
         return [DeviceInfo("fake-spk", "시험용 스피커", True)]
 
+    def _open(self, kind: str, factory, device_id: str | None, default: str) -> Source:
+        src = factory()
+        if getattr(src, "device_id", None) is None:
+            src.device_id = device_id or default
+        self.opened.append((kind, src.device_id, threading.get_ident()))
+        return src
+
     def open_microphone(self, device_id: str | None) -> Source:
-        return self._mic()
+        return self._open("mic", self._mic, device_id, self.default_mic)
 
     def open_loopback(self, speaker_id: str | None) -> Source:
-        return self._loop()
+        return self._open("loop", self._loop, speaker_id, self.default_spk)
+
+    def default_microphone_id(self) -> str | None:
+        return self.default_mic
+
+    def default_speaker_id(self) -> str | None:
+        return self.default_spk
 
 
 def default_backend() -> Backend:

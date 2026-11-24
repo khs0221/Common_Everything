@@ -97,6 +97,11 @@ class App:
         self.rec_warn = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.rec_warn, foreground="#b35c00", wraplength=520).grid(
             row=3, column=0, columnspan=3, sticky="w", padx=6)
+        # 장치 끊김 등 지금 녹음에 문제가 있을 때 띄우는 빨간 경고
+        self.rec_alarm = tk.StringVar(value="")
+        self.alarm_label = tk.Label(f, textvariable=self.rec_alarm, fg="white", bg="#c62828",
+                                    font=("Segoe UI", 11, "bold"), wraplength=520, justify="left")
+        self._alarm_shown = False
         f.columnconfigure(2, weight=1)
 
         f = ttk.LabelFrame(self.root, text="3. 글로 옮기기")
@@ -176,8 +181,11 @@ class App:
             cb.set("")
 
     def _selected(self, cb: ttk.Combobox, devs: list[DeviceInfo]) -> str | None:
+        """고른 장치 id. '(기본)' 장치를 골랐으면 None: 녹음 중 윈도우 기본 장치가 바뀌면 따라갑니다."""
         i = cb.current()
-        return devs[i].id if 0 <= i < len(devs) else None
+        if not (0 <= i < len(devs)):
+            return None
+        return None if devs[i].is_default else devs[i].id
 
     def _check_models(self):
         missing = models.missing_models()
@@ -240,6 +248,7 @@ class App:
             w.configure(state="normal")
         self.mic_bar["value"] = self.loop_bar["value"] = 0
         self.rec_warn.set("")
+        self._show_alarm({})
         if res is None:
             return
         errs = {k: v["error"] for k, v in res.stats.items() if v.get("error")}
@@ -248,7 +257,10 @@ class App:
                  res.stats["loop"]["frames_padded"] / max(1, res.stats["loop"]["samplerate"]), list(errs))
         msg = f"녹음이 끝났습니다({fmt_elapsed(res.seconds)})."
         if errs:
-            msg += " 일부 장치에 오류가 있었습니다: " + ", ".join("마이크" if k == "mic" else "스피커" for k in errs)
+            msg += " 녹음 중 장치 문제가 있었습니다: " + ", ".join("마이크" if k == "mic" else "스피커" for k in errs)
+            reconn = sum(v.get("reconnects", 0) for v in res.stats.values())
+            if reconn:
+                msg += f" (다시 연결 {reconn}번, 끊긴 동안은 무음)"
         self.status.set(msg)
         if self.auto_var.get():
             self._start_job(pipeline.job_for_folder(res.folder, self._lang(), self._spk_n()))
@@ -267,15 +279,32 @@ class App:
                     self.silent_since[key] = now
                 elif self.silent_since[key] and now - self.silent_since[key] > SILENT_WARN_S:
                     warns.append(f"{label}가 1분 넘게 조용합니다. 장치 선택을 확인해 주십시오.")
-            for k, e in rec.errors().items():
-                who = "마이크" if k == "mic" else "스피커"
-                if e.startswith("디스크"):
-                    warns.append(f"{who} 녹음 파일을 쓰지 못하고 있습니다. 저장 공간을 확인해 주십시오.")
-                else:
-                    warns.append(f"{who} 장치 오류로 이 트랙은 무음으로 채우고 있습니다.")
+            if any(w.startswith("내 마이크") for w in warns):
+                warns.append("윈도우 설정 → 개인 정보 및 보안 → 마이크에서 '데스크톱 앱이 마이크에 "
+                             "액세스하도록 허용' 이 켜져 있는지도 확인해 주십시오.")
             self.rec_warn.set(" ".join(warns))
+            self._show_alarm(rec.problems())
         self._drain_queue()
         self.root.after(200, self._tick)
+
+    def _show_alarm(self, problems: dict):
+        """장치 끊김 등은 창 안의 빨간 띠 + 제목 표시 + 알림음 1번으로 분명히 알립니다."""
+        if problems:
+            self.rec_alarm.set("⚠ " + " ".join(problems.values()))
+            if not self._alarm_shown:
+                self.alarm_label.grid(row=4, column=0, columnspan=3, sticky="we", padx=6, pady=4)
+                self.root.title("⚠ 녹음 장치 문제 - 회의 녹음·기록")
+                try:
+                    self.root.bell()
+                except tk.TclError:
+                    pass
+                self._alarm_shown = True
+                log.warning("녹음 장치 문제: %s", list(problems))
+        elif self._alarm_shown:
+            self.alarm_label.grid_remove()
+            self.rec_alarm.set("")
+            self.root.title("회의 녹음·기록")
+            self._alarm_shown = False
 
     # ------------------------------------------------------------ 처리
     def _lang(self):

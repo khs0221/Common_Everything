@@ -1,11 +1,18 @@
 """두 트랙 녹음(마이크 = 나, 스피커 루프백 = 상대방).
 
+스레드 구성(트랙마다 2개)
+- 녹음 스레드: COM 초기화 → 장치 열기 → 읽기 → (끊기면 다시 열기) → 닫기. 장치를 여는 스레드와
+  읽는 스레드가 같습니다(soundcard 의 COM 객체를 만든 스레드에서만 다룸, 감사 F1).
+- 쓰기 스레드: 녹음 스레드가 줄에 넣은 조각을 디스크에 씁니다(디스크가 잠깐 느려도 장치 버퍼가 넘치지 않게).
+
 시간축 맞추기
-- 두 트랙은 같은 출발 시각(t0)을 기준으로 씁니다.
-- 조각이 도착할 때마다 '지금까지 흐른 시간 × 표본 주파수' 와 실제로 쓴 표본 수를 비교해,
-  모자라면(루프백이 무음이라 데이터가 안 온 경우, 장치가 잠시 멈춘 경우) 그만큼 무음을
-  채운 뒤 씁니다. 그래서 두 파일의 같은 위치는 같은 시각입니다.
-- 장치가 오류로 멈추면 그 트랙은 중지 때까지 무음으로 채워 길이를 맞춥니다.
+- 두 장치의 스트림 시작 시각 중 이른 쪽을 녹음 출발 시각(t0)으로 삼고, 늦게 열린 트랙은 그 차이만큼
+  앞을 무음으로 채웁니다(감사 F3). 장치를 다시 연 경우에도 새 스트림 시작 시각 위치까지 무음을 채웁니다.
+- 그 밖에는 장치가 준 표본을 이어 씁니다(soundcard 는 루프백이 조용할 때 경과 시간만큼 0 을 줍니다).
+  조각이 도착한 시각보다 쓴 길이가 LAG_TOLERANCE_S 넘게 모자라면(장치가 멈춰 버퍼가 넘친 경우)
+  모자란 만큼 무음을 채웁니다. 이 값은 WASAPI 버퍼(0.5초)보다 커서, 버퍼 안에서 늦게 읽은 정상
+  데이터를 무음으로 밀어내지 않습니다.
+- 장치 오류·기본 장치 변경 때는 1초마다 다시 열기를 시도하고(감사 F2), 그동안의 빈 시간은 무음으로 채웁니다.
 - 중지할 때 두 트랙을 같은 길이(초)로 맞춥니다.
 """
 from __future__ import annotations
@@ -21,15 +28,20 @@ from typing import Callable
 
 import numpy as np
 
-from .audio_io import WavTrackWriter
-from .devices import Backend, Source
+from .audio_io import Resampler, WavTrackWriter
+from .devices import WASAPI_BUFFER_SECONDS, Backend, Source, com_init, com_uninit
 
 MIC_FILE = "마이크_나.wav"
 LOOP_FILE = "스피커_상대방.wav"
 INFO_FILE = "녹음정보.json"
 
-# 이 이상 뒤처지면 무음을 채웁니다(초). 장치 버퍼 지연보다 커야 합니다.
-LAG_TOLERANCE_S = 0.25
+LAG_TOLERANCE_S = WASAPI_BUFFER_SECONDS + 0.25  # 0.75초
+RECONNECT_INTERVAL_S = 1.0
+DEFAULT_PROBE_S = 2.0     # '기본 장치 따라가기' 일 때 기본 장치가 바뀌었는지 보는 간격
+OPEN_TIMEOUT_S = 15.0
+STOP_JOIN_S = 2.0
+
+KIND_NAMES = {"mic": "마이크", "loop": "스피커"}
 
 
 def level_dbfs(x: np.ndarray) -> float:
@@ -42,80 +54,93 @@ def level_dbfs(x: np.ndarray) -> float:
 @dataclass
 class TrackStats:
     frames_written: int = 0
-    frames_padded: int = 0
+    frames_padded: int = 0      # 채운 무음 전체(시작 보정 포함)
+    lead_in_frames: int = 0     # 시작 시각 차이 보정으로 앞에 채운 무음
     pad_events: int = 0
     max_lead_s: float = 0.0
-    error: str | None = None
+    reconnects: int = 0
+    default_changes: int = 0
+    error: str | None = None    # 마지막 오류(기술 정보)
     samplerate: int = 0
+    reader_alive_after_stop: bool = False
 
 
 class AlignedTrack:
-    """한 트랙: 장치에서 읽어 시각에 맞춰 디스크에 씁니다."""
+    """한 트랙: 장치 열기·읽기(녹음 스레드)와 시각 맞춘 쓰기(쓰기 스레드)."""
 
-    def __init__(self, name: str, source: Source, path: Path, t0: float,
-                 clock: Callable[[], float], stop: threading.Event):
+    def __init__(self, name: str, opener: Callable[[], Source], clock: Callable[[], float],
+                 stop: threading.Event, default_probe: Callable[[], str | None] | None = None,
+                 path: Path | None = None, t0: float | None = None, samplerate: int | None = None):
         self.name = name
-        self.source = source
-        self.sr = int(source.samplerate)
-        self.writer = WavTrackWriter(path, self.sr)
-        self.t0 = t0
+        self.opener = opener
         self.clock = clock
         self.stop_event = stop
-        self.stats = TrackStats(samplerate=self.sr)
+        self.default_probe = default_probe  # None 이면 고른 장치에 고정
+        self.source: Source | None = None
+        self._source_closed = True
+        self.sr: int | None = samplerate
+        self.started_at: float | None = None  # 처음 스트림 시작 시각
+        self.opened_id: str | None = None
+        self.ready = threading.Event()
+        self.open_error: BaseException | None = None
+        self.state = "opening"  # opening | ok | reconnecting | stopped
+        self.stats = TrackStats()
         self.level = -90.0
+        self.t0 = t0
+        self.writer: WavTrackWriter | None = None
+        self._rs: Resampler | None = None
         self._lock = threading.Lock()
-        # 장치 읽기와 디스크 쓰기를 다른 스레드로 나눕니다. 디스크가 잠깐 느려져도(fsync 등)
-        # 장치 버퍼를 제때 비워 소리가 빠지지 않게 하기 위함입니다.
         self._q: queue.Queue = queue.Queue()
         self.thread = threading.Thread(target=self._run, name=f"rec-{name}", daemon=True)
         self.writer_thread = threading.Thread(target=self._write_loop, name=f"wr-{name}", daemon=True)
+        if path is not None:  # 시험에서 장치 없이 write_block 만 쓸 때
+            self.attach_writer(path, t0 or 0.0)
 
-    def start(self) -> None:
-        self.writer_thread.start()
-        self.thread.start()
+    # ------------------------------------------------------------ 쓰기 쪽
+    def attach_writer(self, path: Path, t0: float) -> None:
+        assert self.sr, "표본 주파수를 모릅니다"
+        self.t0 = t0
+        self.writer = WavTrackWriter(path, self.sr)
+        self.stats.samplerate = self.sr
 
     def write_block(self, block: np.ndarray, now: float) -> None:
         """조각을 시각에 맞춰 씁니다(시험에서 직접 부를 수 있게 분리)."""
         with self._lock:
-            if self.writer.closed:
+            w = self.writer
+            if w is None or w.closed:
                 return
             expected_end = int(round((now - self.t0) * self.sr))
-            expected_start = expected_end - len(block)
-            lag = expected_start - self.writer.frames_written
+            lag = expected_end - len(block) - w.frames_written
             if lag > int(LAG_TOLERANCE_S * self.sr):
-                self.writer.write_silence(lag)
+                w.write_silence(lag)
                 self.stats.frames_padded += lag
                 self.stats.pad_events += 1
-            self.writer.write(block)
-            lead = (self.writer.frames_written - expected_end) / self.sr
+            w.write(block)
+            lead = (w.frames_written - expected_end) / self.sr
             if lead > self.stats.max_lead_s:
                 self.stats.max_lead_s = lead
-            self.stats.frames_written = self.writer.frames_written
+            self.stats.frames_written = w.frames_written
 
-    def _run(self) -> None:
-        """장치 읽기 스레드: 조각과 도착 시각을 줄에 넣기만 합니다."""
-        try:
-            while True:
-                block = self.source.read()
-                now = self.clock()
-                if block.size:
-                    self.level = level_dbfs(block)
-                    self._q.put((block, now))  # 중지 직후 도착한 조각도 씁니다(마지막 말 끝 보존)
-                if self.stop_event.is_set():
-                    break
-        except Exception as e:  # 장치 뽑힘 등: 기록만 하고 나머지 트랙은 계속
-            self.stats.error = f"{type(e).__name__}: {e}"
-            self.level = -90.0
-        finally:
-            self._q.put(None)
-            try:
-                self.source.close()
-            except Exception:
-                pass
+    def sync_to(self, stream_start: float, lead_in: bool = False) -> None:
+        """스트림이 stream_start 에 시작했다면 그 위치까지 무음을 채웁니다."""
+        with self._lock:
+            w = self.writer
+            if w is None or w.closed:
+                return
+            target = int(round((stream_start - self.t0) * self.sr))
+            missing = target - w.frames_written
+            if missing > 0:
+                w.write_silence(missing)
+                self.stats.frames_padded += missing
+                if lead_in:
+                    self.stats.lead_in_frames += missing
+                else:
+                    self.stats.pad_events += 1
+            self.stats.frames_written = w.frames_written
 
     def _write_loop(self) -> None:
-        """디스크 쓰기 스레드."""
         failed = False
+        first_sync = True
         while True:
             item = self._q.get()
             if item is None:
@@ -123,32 +148,139 @@ class AlignedTrack:
             if failed:
                 continue  # 쓰기 실패 뒤에는 줄만 비웁니다(메모리 증가 방지)
             try:
-                self.write_block(*item)
+                if item[0] == "sync":
+                    self.sync_to(item[1], lead_in=first_sync)
+                    first_sync = False
+                else:
+                    self.write_block(item[1], item[2])
             except OSError as e:  # 디스크 가득 참 등
                 self.stats.error = f"디스크 쓰기 오류: {e}"
                 failed = True
 
+    # ------------------------------------------------------------ 장치 쪽(녹음 스레드)
+    def _open(self) -> None:
+        src = self.opener()
+        started = getattr(src, "started_at", None) or self.clock()
+        self.source = src
+        self._source_closed = False
+        if self.sr is None:
+            self.sr = int(src.samplerate)
+        self._rs = None if int(src.samplerate) == self.sr else Resampler(int(src.samplerate), self.sr)
+        self.opened_id = getattr(src, "device_id", None)
+        if self.started_at is None:
+            self.started_at = started
+        self._q.put(("sync", started))
+        self.state = "ok"
+
+    def _close_source(self) -> None:
+        """지금 장치를 닫습니다(참조는 남겨 둠: 닫힌 마지막 장치를 확인할 수 있게)."""
+        src = self.source
+        if src is not None and not self._source_closed:
+            self._source_closed = True
+            try:
+                src.close()
+            except Exception:
+                pass
+
+    def _reconnect(self, reason: str) -> bool:
+        """다시 열릴 때까지 RECONNECT_INTERVAL_S 마다 시도합니다. 중지되면 False."""
+        self.state = "reconnecting"
+        self.level = -90.0
+        self.stats.error = reason
+        self._close_source()
+        while not self.stop_event.is_set():
+            try:
+                self._open()
+                self.stats.reconnects += 1
+                return True
+            except Exception as e:
+                self.stats.error = f"{reason} / 다시 열기 실패: {type(e).__name__}: {e}"
+            if self.stop_event.wait(RECONNECT_INTERVAL_S):
+                break
+        return False
+
+    def _run(self) -> None:
+        inited = com_init()
+        try:
+            try:
+                self._open()
+            except BaseException as e:
+                self.open_error = e
+                return
+            finally:
+                self.ready.set()
+            last_probe = self.clock()
+            while not self.stop_event.is_set():
+                try:
+                    block = self.source.read()
+                except Exception as e:  # 장치 뽑힘 등
+                    if not self._reconnect(f"장치 오류: {type(e).__name__}: {e}"):
+                        break
+                    continue
+                now = self.clock()
+                if block.size:
+                    if self._rs is not None:
+                        block = self._rs.process(block)
+                    self.level = level_dbfs(block)
+                    self._q.put(("data", block, now))  # 중지 직후 도착한 조각도 씁니다
+                if self.default_probe and now - last_probe >= DEFAULT_PROBE_S:
+                    last_probe = now
+                    try:
+                        cur = self.default_probe()
+                    except Exception:
+                        cur = None
+                    if cur and self.opened_id and cur != self.opened_id:
+                        self.stats.default_changes += 1
+                        if not self._reconnect("윈도우 기본 장치가 바뀌어 다시 연결"):
+                            break
+        finally:
+            self.state = "stopped"
+            self._q.put(None)
+            self._close_source()
+            com_uninit(inited)
+
+    def cancel_read(self) -> None:
+        """시험용 장치는 기다리는 read() 를 바로 돌려보낼 수 있습니다(실제 장치는 0.1초 안에 돌아옴)."""
+        src = self.source
+        if src is not None and hasattr(src, "cancel"):
+            try:
+                src.cancel()
+            except Exception:
+                pass
+
     def finish(self, timeout: float) -> None:
-        """읽기 스레드가 끝나길 기다리고, 줄에 남은 조각을 모두 쓴 뒤 돌아옵니다."""
+        """녹음 스레드가 끝나길 기다리고, 줄에 남은 조각을 모두 쓴 뒤 돌아옵니다."""
         self.thread.join(timeout)
         if self.thread.is_alive():  # 장치가 응답하지 않음: 쓰기 스레드만 끝냄
+            self.stats.reader_alive_after_stop = True
             self._q.put(None)
-        self.writer_thread.join(max(timeout, 10.0))
+        if self.writer_thread.is_alive():
+            self.writer_thread.join(max(timeout, 10.0))
 
     def pad_to_seconds(self, seconds: float) -> None:
         with self._lock:
-            if self.writer.closed:
+            w = self.writer
+            if w is None or w.closed:
                 return
             target = int(round(seconds * self.sr))
-            missing = target - self.writer.frames_written
+            missing = target - w.frames_written
             if missing > 0:
-                self.writer.write_silence(missing)
+                w.write_silence(missing)
                 self.stats.frames_padded += missing
-            self.stats.frames_written = self.writer.frames_written
+            self.stats.frames_written = w.frames_written
 
     def close(self) -> None:
         with self._lock:
-            self.writer.close()
+            if self.writer is not None:
+                self.writer.close()
+
+    def problem(self) -> str | None:
+        """화면에 띄울 지금의 문제(없으면 None)."""
+        if self.state == "reconnecting":
+            return f"{KIND_NAMES.get(self.name, self.name)} 장치가 끊겼습니다. 다시 연결하는 중이며, 그동안은 무음으로 채웁니다."
+        if self.stats.error and self.stats.error.startswith("디스크"):
+            return f"{KIND_NAMES.get(self.name, self.name)} 녹음 파일을 쓰지 못하고 있습니다. 저장 공간을 확인해 주십시오."
+        return None
 
 
 @dataclass
@@ -173,7 +305,10 @@ def new_meeting_folder(root: Path, now: datetime | None = None) -> Path:
 
 
 class Recorder:
-    """녹음 시작/중지. 장치 계층(Backend)을 바꿔 끼울 수 있습니다."""
+    """녹음 시작/중지. 장치 계층(Backend)을 바꿔 끼울 수 있습니다.
+
+    mic_id / speaker_id 가 None 이면 '윈도우 기본 장치' 를 쓰고, 녹음 중 기본 장치가 바뀌면 따라갑니다.
+    """
 
     def __init__(self, backend: Backend, clock: Callable[[], float] = time.monotonic):
         self.backend = backend
@@ -189,24 +324,40 @@ class Recorder:
         if self.running:
             raise RuntimeError("이미 녹음 중입니다")
         output_root.mkdir(parents=True, exist_ok=True)
-        # 장치를 먼저 열어 보고, 실패하면 폴더를 만들지 않습니다.
-        mic = self.backend.open_microphone(mic_id)
-        try:
-            loop = self.backend.open_loopback(speaker_id)
-        except Exception:
-            mic.close()
-            raise
+        self._stop = threading.Event()
+        b = self.backend
+        probe_mic = getattr(b, "default_microphone_id", None) if mic_id is None else None
+        probe_spk = getattr(b, "default_speaker_id", None) if speaker_id is None else None
+        self.tracks = {
+            "mic": AlignedTrack("mic", lambda: b.open_microphone(mic_id), self.clock, self._stop, probe_mic),
+            "loop": AlignedTrack("loop", lambda: b.open_loopback(speaker_id), self.clock, self._stop, probe_spk),
+        }
+        # 1) 두 장치를 각자의 녹음 스레드에서 엽니다(읽기도 곧바로 시작해 버퍼가 넘치지 않게).
+        for t in self.tracks.values():
+            t.thread.start()
+        deadline = time.monotonic() + OPEN_TIMEOUT_S
+        for t in self.tracks.values():
+            t.ready.wait(max(0.0, deadline - time.monotonic()))
+        errs = [t.open_error or (None if t.ready.is_set() else TimeoutError("장치 열기 시간 초과"))
+                for t in self.tracks.values()]
+        errs = [e for e in errs if e is not None]
+        if errs:
+            # 실패하면 폴더를 만들지 않습니다.
+            self._stop.set()
+            for t in self.tracks.values():
+                t.cancel_read()
+                t.thread.join(STOP_JOIN_S)
+            self.tracks = {}
+            raise errs[0]
+        # 2) 출발 시각 = 두 스트림 중 먼저 시작한 시각. 늦은 쪽은 앞을 무음으로 채웁니다.
+        self.t0 = min(t.started_at for t in self.tracks.values())
         self.started_at = datetime.now()
         self.folder = new_meeting_folder(output_root, self.started_at)
-        self._stop = threading.Event()
-        self.t0 = self.clock()
-        self.tracks = {
-            "mic": AlignedTrack("mic", mic, self.folder / MIC_FILE, self.t0, self.clock, self._stop),
-            "loop": AlignedTrack("loop", loop, self.folder / LOOP_FILE, self.t0, self.clock, self._stop),
-        }
+        self.tracks["mic"].attach_writer(self.folder / MIC_FILE, self.t0)
+        self.tracks["loop"].attach_writer(self.folder / LOOP_FILE, self.t0)
         self._write_info(finished=False)
         for t in self.tracks.values():
-            t.start()
+            t.writer_thread.start()
         self.running = True
         return self.folder
 
@@ -217,18 +368,30 @@ class Recorder:
         return {k: t.level for k, t in self.tracks.items()}
 
     def errors(self) -> dict[str, str]:
+        """기록된 마지막 오류(다시 연결된 뒤에도 남음, 기술 정보)."""
         return {k: t.stats.error for k, t in self.tracks.items() if t.stats.error}
 
-    def stop(self, join_timeout: float = 3.0) -> RecordingResult:
+    def problems(self) -> dict[str, str]:
+        """지금 화면에 경고로 띄울 문제."""
+        out = {}
+        for k, t in self.tracks.items():
+            p = t.problem()
+            if p:
+                out[k] = p
+        return out
+
+    def stop(self, join_timeout: float = STOP_JOIN_S) -> RecordingResult:
         if not self.running:
             raise RuntimeError("녹음 중이 아닙니다")
         end = self.clock() - self.t0
         self._stop.set()
         # 장치는 각 녹음 스레드가 스스로 닫습니다(읽는 도중 다른 스레드에서 닫지 않음).
         for t in self.tracks.values():
+            t.cancel_read()
+        for t in self.tracks.values():
             t.finish(join_timeout)
         # 두 트랙을 같은 길이로 맞춥니다.
-        longest = max([end] + [t.writer.seconds for t in self.tracks.values()])
+        longest = max([end] + [t.writer.seconds for t in self.tracks.values() if t.writer])
         for t in self.tracks.values():
             try:
                 t.pad_to_seconds(longest)
