@@ -276,3 +276,32 @@ def test_disk_write_failure_is_reported_and_stop_finishes(tmp_path):
     assert time.monotonic() - t < 5
     assert res.stats["loop"]["error"] is None
     assert sf.info(str(res.loop_path)).frames >= int(0.9 * SR)
+
+
+def test_start_failure_after_open_stops_threads(tmp_path, monkeypatch):
+    """장치는 열렸는데 폴더·파일 준비가 실패하면 녹음 스레드를 멈추고 장치를 닫아야 합니다(감사 N1)."""
+    from mrec import recorder as recmod
+
+    def no_space(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(recmod, "new_meeting_folder", no_space)
+    made = []
+
+    def mk(freq):
+        def f():
+            made.append(FakeSource(SR, tone(freq, 0.1, SR)))
+            return made[-1]
+        return f
+
+    rec = Recorder(FakeBackend(mic=mk(440), loop=mk(660)))
+    before = threading.active_count()
+    try:
+        rec.start(tmp_path, None, None)
+        raise AssertionError("예외가 나야 합니다")
+    except OSError:
+        pass
+    time.sleep(0.2)
+    assert not rec.running and rec.tracks == {}
+    assert len(made) == 2 and all(s._closed.is_set() for s in made)
+    assert threading.active_count() <= before

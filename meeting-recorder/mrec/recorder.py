@@ -343,23 +343,40 @@ class Recorder:
         errs = [e for e in errs if e is not None]
         if errs:
             # 실패하면 폴더를 만들지 않습니다.
-            self._stop.set()
-            for t in self.tracks.values():
-                t.cancel_read()
-                t.thread.join(STOP_JOIN_S)
-            self.tracks = {}
+            self._abort_start()
             raise errs[0]
         # 2) 출발 시각 = 두 스트림 중 먼저 시작한 시각. 늦은 쪽은 앞을 무음으로 채웁니다.
         self.t0 = min(t.started_at for t in self.tracks.values())
         self.started_at = datetime.now()
-        self.folder = new_meeting_folder(output_root, self.started_at)
-        self.tracks["mic"].attach_writer(self.folder / MIC_FILE, self.t0)
-        self.tracks["loop"].attach_writer(self.folder / LOOP_FILE, self.t0)
-        self._write_info(finished=False)
+        try:
+            self.folder = new_meeting_folder(output_root, self.started_at)
+            self.tracks["mic"].attach_writer(self.folder / MIC_FILE, self.t0)
+            self.tracks["loop"].attach_writer(self.folder / LOOP_FILE, self.t0)
+            self._write_info(finished=False)
+        except BaseException:
+            # 폴더·파일 준비가 실패하면(디스크 가득 참 등) 이미 읽고 있는 녹음 스레드를 멈추고
+            # 장치를 닫습니다. 멈추지 않으면 쓰이지 않는 조각이 줄에 계속 쌓입니다(감사 N1).
+            self._abort_start()
+            raise
         for t in self.tracks.values():
             t.writer_thread.start()
         self.running = True
         return self.folder
+
+    def _abort_start(self) -> None:
+        self._stop.set()
+        for t in self.tracks.values():
+            t.cancel_read()
+        for t in self.tracks.values():
+            t.thread.join(STOP_JOIN_S)
+            if t.thread.is_alive():
+                t.stats.reader_alive_after_stop = True
+            try:
+                t.close()  # 만들어진 파일이 있으면 닫음
+            except OSError:
+                pass
+        self.tracks = {}
+        self.running = False
 
     def elapsed(self) -> float:
         return self.clock() - self.t0 if self.running else 0.0
