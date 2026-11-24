@@ -106,6 +106,7 @@ def test_selftest_passes(tmp_path):
     from mrec import selftest
 
     out = tmp_path / "r.json"
-    assert selftest.run(str(out)) == 0
+    rc = selftest.run(str(out))
     rep = json.loads(out.read_text(encoding="utf-8"))
-    assert rep["ok"] and rep["peak_memory_mb"] > 0
+    assert rc == 0, rep.get("failed_summary")  # 실패하면 어느 항목인지 시험 결과에 바로 보임
+    assert rep["ok"] and rep["peak_memory_mb"] > 0 and rep["failed_summary"] == []

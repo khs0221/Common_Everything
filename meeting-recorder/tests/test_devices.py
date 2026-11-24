@@ -70,3 +70,54 @@ def test_tk_root_retry_only_on_tcl_error():
     mod, _ = fake(1, exc=ValueError)  # TclError 가 아닌 오류는 감추지 않음
     with pytest.raises(ValueError):
         make_tk_root(mod, attempts=3, wait_s=0)
+
+
+def test_import_audio_module_retries_cleanly_and_without_com_init(tmp_path, monkeypatch):
+    """soundcard 불러오기: COM 을 먼저 초기화하지 않은 새 스레드에서, 실패 뒤 다시 부르면 처음부터(R2)."""
+    import sys
+
+    from mrec import devices
+
+    pkg = tmp_path / "fakesc_r2"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("from fakesc_r2.mediafoundation import *\n", encoding="utf-8")
+    (pkg / "mediafoundation.py").write_text(
+        "import builtins\n"
+        "builtins._fakesc_tries = getattr(builtins, '_fakesc_tries', 0) + 1\n"
+        "if builtins._fakesc_tries == 1:\n"
+        "    raise RuntimeError('Error 0x100000001')\n"
+        "VALUE = 42\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    com_threads = []
+    monkeypatch.setattr(devices, "com_init", lambda: com_threads.append(threading.get_ident()) or False)
+    import builtins
+
+    try:
+        with pytest.raises(RuntimeError, match="0x100000001"):
+            devices.import_audio_module("fakesc_r2")
+        # 반쯤 불러온 모듈이 남지 않음
+        assert "fakesc_r2" not in sys.modules and "fakesc_r2.mediafoundation" not in sys.modules
+        mod = devices.import_audio_module("fakesc_r2")
+        assert mod.VALUE == 42 and builtins._fakesc_tries == 2
+        assert devices.import_audio_module("fakesc_r2") is mod  # 두 번째부터는 불러 둔 것
+        assert com_threads == []  # 불러오는 스레드는 COM 을 먼저 초기화하지 않음
+    finally:
+        for k in [k for k in sys.modules if k.startswith("fakesc_r2")]:
+            del sys.modules[k]
+        if hasattr(builtins, "_fakesc_tries"):
+            del builtins._fakesc_tries
+
+
+def test_import_audio_module_runs_off_main_thread(tmp_path, monkeypatch):
+    import sys
+
+    from mrec import devices
+
+    (tmp_path / "fakesc_thr.py").write_text(
+        "import threading\nTHREAD = threading.get_ident()\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        mod = devices.import_audio_module("fakesc_thr")
+        assert mod.THREAD != threading.get_ident()
+    finally:
+        sys.modules.pop("fakesc_thr", None)
