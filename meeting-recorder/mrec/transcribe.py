@@ -53,11 +53,50 @@ class Segment:
     words: list[Word] = field(default_factory=list)
 
 
+HALLUCINATION_GUARD = True
+
+
+class HallucinationGuard:
+    """말하지 않은 글(환각) 거르기(R6 수정 1회차).
+
+    turbo 의 무음 확률(no_speech_prob)은 잡음·무음에서도 0 으로 나와 기본 기준이 듣지 않습니다(측정).
+    대신 두 가지를 봅니다.
+    1. 소리 없는 곳의 글: 구간이 묶음 소리의 끝을 넘거나(30초 창 꼬리의 무음 채움), 구간 소리 크기가
+       묶음 말소리 크기(32ms 창 RMS 의 75번째 백분위)의 10% 미만이면 버립니다.
+    2. 확신 낮은 짧은 글: 4단어 이하이고 첫 단어 확률 < 0.35, 평균 단어 확률 < 0.6 이면 버립니다
+       ("Thank you.", "감사합니다.", "다음 영상에서 만나요." 같은 전형적인 환각이 여기에 듭니다).
+    """
+
+    FRAME = 512
+
+    def __init__(self, audio):
+        self.audio = np.asarray(audio, dtype=np.float32)
+        self.dur = len(self.audio) / TARGET_SR
+        n = len(self.audio) // self.FRAME * self.FRAME
+        if n:
+            fr = self.audio[:n].reshape(-1, self.FRAME).astype(np.float64)
+            self.ref = float(np.percentile(np.sqrt((fr ** 2).mean(axis=1)), 75))
+        else:
+            self.ref = 0.0
+
+    def reject(self, seg) -> bool:
+        a, b = float(seg.start), min(float(seg.end), self.dur)
+        if b - a < 0.1:  # 소리가 끝난 뒤(또는 거의 없는 곳)의 글
+            return True
+        x = self.audio[int(a * TARGET_SR):int(b * TARGET_SR)]
+        if self.ref > 0 and x.size and float(np.sqrt(np.mean(np.square(x, dtype=np.float64)))) < 0.1 * self.ref:
+            return True
+        probs = [float(w.probability) for w in (seg.words or [])]
+        if probs and len(probs) <= 4 and probs[0] < 0.35 and sum(probs) / len(probs) < 0.6:
+            return True
+        return False
+
+
 class Transcriber:
     def __init__(self, model_dir: Path | None = None, threads: int | None = None, beam_size: int = 1,
                  model: str = "turbo", hotwords: str | None = None, hint_langs: tuple[str, ...] = ("en",),
                  hint_vocab_text: str | None = None):
-        """model: 'turbo'(글로 옮기기) 또는 'base'(발언 단위 언어 판별 전용). hotwords: 인식 힌트 문자열(hint_langs 언어 묶음에만)."""
+        """model: 'turbo'(글로 옮기기) 또는 'small'(발언 단위 언어 판별 전용). hotwords: 인식 힌트 문자열(hint_langs 언어 묶음에만)."""
         _stub_optional_imports()
         from faster_whisper import WhisperModel
 
@@ -147,12 +186,16 @@ class Transcriber:
             self.hint_retries = getattr(self, "hint_retries", 0) + 1
             segs, info = self._run(audio, lang, words, hints=False)
         out: list[Segment] = []
+        guard = HallucinationGuard(audio) if HALLUCINATION_GUARD else None
         for s in segs:
             text = s.text.strip()
             if not text:
                 continue
             # 말이 없는데 지어낸 듯한 구간 거르기(whisper 기본 기준과 같음)
             if s.no_speech_prob > 0.6 and s.avg_logprob < -1.0:
+                continue
+            if guard is not None and guard.reject(s):
+                self.dropped_hallucinations = getattr(self, "dropped_hallucinations", 0) + 1
                 continue
             ws = [Word(offset + w.start, offset + w.end, w.word, float(getattr(w, 'probability', 1.0)))
                   for w in (s.words or [])]

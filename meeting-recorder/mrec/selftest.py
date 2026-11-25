@@ -46,6 +46,32 @@ def score_languages(truth: list[dict], utts: list) -> dict:
             "missing": sum(b == "?" for _, b in rows)}
 
 
+def _units(text: str) -> list[str]:
+    """비교 단위: 영어는 낱말, 한글은 두 글자 묶음(한 글자짜리는 그 글자)."""
+    t = text.casefold()
+    out = re.findall(r"[a-z0-9']+", t)
+    for run in re.findall(r"[가-힣]+", t):
+        out += [run[i:i + 2] for i in range(len(run) - 1)] if len(run) > 1 else [run]
+    return out
+
+
+def extra_sentences(truth: list[dict], utts: list, min_share: float = 0.5) -> list[str]:
+    """정답에 없는 문장(말하지 않은 글이 덧붙은 것)을 찾습니다(감사 R6 I2).
+
+    출력 글을 문장 부호로 나눠, 문장의 비교 단위 중 정답 글 전체에 나오는 몫이 min_share 미만이면 덧붙은
+    문장으로 봅니다. 인식 오류(시민지↔식민지 등)는 대부분 단위가 정답과 겹쳐 걸리지 않고, "감사합니다." 나
+    "Thank you." 처럼 정답과 겹치는 데가 거의 없는 문장만 걸립니다.
+    """
+    ref = set(_units(" ".join(t["text"] for t in truth)))
+    out = []
+    for u in utts:
+        for sent in re.split(r"(?<=[.?!。])\s+", u.text.strip()):
+            units = _units(sent)
+            if units and sum(x in ref for x in units) / len(units) < min_share:
+                out.append(sent)
+    return out
+
+
 def _check(results: list, name: str, ok: bool, detail: str = "") -> bool:
     results.append({"name": name, "ok": bool(ok), "detail": detail})
     return ok
@@ -295,10 +321,15 @@ def run(out_path: str | None = None) -> int:
             pipeline.run(pipeline.Job(mix, mix / "mix.flac", None, language=None))
             report["mixed_lang_seconds"] = round(time.monotonic() - t, 1)
             mtruth = json.loads((sdir / "sample_mixed_lang_truth.json").read_text(encoding="utf-8"))
-            sc = score_languages(mtruth, output.load_result_json(mix)[0])
+            mutts = output.load_result_json(mix)[0]
+            sc = score_languages(mtruth, mutts)
             report["mixed_lang_score"] = sc
             _check(results, "혼합 언어(한↔영 전환) 발언별 언어", sc["ok"] == sc["n"] and sc["en_as_hangul"] == 0,
                    f"{sc}")
+            extra = extra_sentences(mtruth, mutts)
+            report["mixed_lang_extra_sentences"] = extra
+            _check(results, "혼합 언어: 정답에 없는 문장이 덧붙지 않음", not extra,
+                   "덧붙은 문장 없음" if not extra else f"덧붙은 문장 {len(extra)}개: {extra[:3]}")
 
             report["model_used_main"] = output.load_result_json(folder)[1].get("model")
     except Exception:
