@@ -137,12 +137,48 @@ def gui_device_path(results: list) -> None:
                                     "detail": _exc_detail(e, 4)})
                 else:
                     _check(results, f"화면 경로: 기본 {kind} id(녹음 스레드 방식)", False, _exc_detail(e))
+        real_device_checks(backend, results)
     finally:
         if root is not None:
             try:
                 root.destroy()
             except Exception:
                 pass
+
+
+MAX_DEVICE_CHECKS = 8
+
+
+def real_device_checks(backend, results: list) -> None:
+    """실제 장치 열기(R5): 목록의 마이크마다, 그리고 기본 스피커 루프백을 0.2초 열어 읽어 봅니다.
+
+    장치가 0개인 CI 에서는 참고로만 적습니다. 장치가 있는데 못 열면 실패로 적고, 시도한 방법별 예외를
+    detail 에 남깁니다(사용자 PC 에서 --selftest 를 돌리면 원인 확인에 쓸 수 있음).
+    """
+    from .devices import check_device
+
+    try:
+        mics = backend.list_microphones()
+    except Exception as e:
+        results.append({"name": "실제 장치 열기(참고: 목록 실패)", "ok": True, "detail": _exc_detail(e, 3)})
+        return
+    if not mics:
+        results.append({"name": "실제 장치 열기(참고: 마이크 0개)", "ok": True, "detail": "CI 등 장치 없는 환경"})
+    for d in mics[:MAX_DEVICE_CHECKS]:
+        r = check_device(backend, "mic", d.id, seconds=0.2)
+        if r["ok"]:
+            detail = f"{r['combo']}, {r['samplerate']}Hz, {r['level_db']}dBFS, 앞서 실패 {len(r['failed_before'])}"
+        else:
+            detail = r.get("error", "")[:1500]
+        _check(results, f"실제 장치 열기: 마이크 {d.name}", r["ok"], detail)
+    try:
+        spk_default = backend.default_speaker_id()
+    except Exception:
+        spk_default = None
+    if spk_default:
+        r = check_device(backend, "loop", None, seconds=0.2)
+        _check(results, "실제 장치 열기: 기본 스피커 루프백", r["ok"],
+               f"{r.get('combo')}, {r.get('level_db')}dBFS" if r["ok"] else r.get("error", "")[:1500])
 
 
 def run(out_path: str | None = None) -> int:
