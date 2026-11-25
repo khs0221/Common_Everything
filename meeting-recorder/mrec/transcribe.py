@@ -80,7 +80,7 @@ class Transcriber:
 
         단어가 3개 이상이고 절반 이상이 힌트 용어의 단어이면서 쉼표로 나열하거나(2개 이상) 반복되면
         (서로 다른 단어 비율 0.5 이하), 또는 같은 단어가 세 번 이상 연속되거나 6단어 이상에서 서로 다른
-        단어 비율이 0.3 이하이면 그렇다고 봅니다. 그렇다고 보면 그 묶음만 힌트 없이 다시 옮기므로(R3 와 같은
+        단어 비율이 0.3 이하이면, 또는 단어의 70% 이상이 힌트 용어의 단어이면(쉼표 없는 나열, R6) 그렇다고 봅니다. 그렇다고 보면 그 묶음만 힌트 없이 다시 옮기므로(R3 와 같은
         결과), 잘못 걸려도 결과가 나빠지지 않고 시간만 더 듭니다.
         """
         ws = re.findall(r"[a-z0-9][a-z0-9&.\-]*", text.lower())
@@ -88,6 +88,10 @@ class Transcriber:
         if len(ws) < 3:
             return False
         uniq = len(set(ws)) / len(ws)
+        vocab = self._hint_vocab()
+        # R6(감사 R4 N1): 쉼표 없이 용어만 늘어놓은 출력도 잡음(단어 70% 이상이 힌트 용어의 단어)
+        if sum(w in vocab for w in ws) / len(ws) >= 0.7:
+            return True
         if len(ws) >= 6 and uniq <= 0.3:
             return True
         run = best = 1
@@ -96,9 +100,21 @@ class Transcriber:
             best = max(best, run)
         if best >= 3:  # 같은 단어 세 번 연속
             return True
-        vocab = self._hint_vocab()
         inv = sum(w in vocab for w in ws) / len(ws)
         return inv >= 0.5 and (text.count(",") >= 2 or uniq <= 0.5)
+
+    def short_hint_only(self, seg) -> bool:
+        """1~2단어 끼어듦(R6, 감사 R4 N1): 구간 글 전체가 힌트 용어 한두 개뿐이고, whisper 가 말소리일
+        가능성을 낮게 본 구간(no_speech_prob > 0.3 또는 avg_logprob < -0.8). 진짜로 용어만 짧게 말한 것은
+        보통 이 확률이 좋아 걸리지 않고, 걸려도 힌트 없이 다시 옮길 뿐입니다."""
+        ws = [w.strip(".-,?!") for w in re.findall(r"[a-z0-9][a-z0-9&.\-]*", seg.text.lower())]
+        ws = [w for w in ws if w]
+        if not ws or len(ws) > 3:
+            return False
+        vocab = self._hint_vocab()
+        if not all(w in vocab for w in ws):
+            return False
+        return getattr(seg, "no_speech_prob", 0.0) > 0.3 or getattr(seg, "avg_logprob", 0.0) < -0.8
 
     def _hint_vocab(self) -> set:
         src = getattr(self, "hint_vocab_text", None) or self.hotwords or ""
@@ -126,7 +142,7 @@ class Transcriber:
             probs = dict(info.all_language_probs or [])
             lang = max(AUTO_LANGS, key=lambda k: probs.get(k, 0.0))
             segs, info = self._run(audio, lang, words)
-        if self._hints_active(lang) and any(self.hint_echo(s.text) for s in segs):
+        if self._hints_active(lang) and any(self.hint_echo(s.text) or self.short_hint_only(s) for s in segs):
             # 힌트 때문에 말하지 않은 용어가 끼어든 것으로 보이면 이 묶음은 힌트 없이 다시 옮깁니다.
             self.hint_retries = getattr(self, "hint_retries", 0) + 1
             segs, info = self._run(audio, lang, words, hints=False)

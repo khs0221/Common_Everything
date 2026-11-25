@@ -211,6 +211,9 @@ def parse_wave_format(raw: bytes) -> dict:
     return d
 
 
+_LAST_OK: dict = {}  # 장치 id → 마지막으로 열린 방법(OpenCombo)
+
+
 class _SoundcardSource:
     """soundcard 의 recorder 를 감싼 조각 읽기. 만든 스레드에서만 읽고 닫아야 합니다."""
 
@@ -227,11 +230,25 @@ class _SoundcardSource:
         self.attempts: list[dict] = []
         self._mix: dict | None = None
         last_err = None
-        for combo in self.COMBOS:
+        combos = list(self.COMBOS)
+        last = _LAST_OK.get(self.device_id)
+        if last in combos:  # 다시 연결할 때는 마지막으로 열린 방법부터(감사 R5 N1)
+            combos.remove(last)
+            combos.insert(0, last)
+        skip_sc = self._mix_not_extensible()
+        for combo in combos:
+            if skip_sc and combo.method == "soundcard":
+                # 믹스 형식이 확장 형식이 아니면 soundcard 의 516·517줄 assert 로 실패하고, 그때 만든 COM 객체를
+                # 돌려받을 수 없어 새므로(감사 R5 N1) 시도하지 않습니다. 열리던 장치는 확장 형식이라 해당 없음.
+                self.attempts.append({"combo": combo.label(), "type": "건너뜀", "repr": f"믹스 형식 {skip_sc}",
+                                      "hresult": None, "where": ""})
+                continue
+            rec = None
             try:
                 rec, sr = self._open(combo)
                 rec.__enter__()
             except Exception as e:
+                self._release_failed(rec)
                 info = describe_exception(e)
                 info["combo"] = combo.label()
                 self.attempts.append(info)
@@ -242,11 +259,37 @@ class _SoundcardSource:
             self.samplerate = int(sr)
             self.combo = combo.label()
             self._block = int(self.samplerate * BLOCK_SECONDS)
+            if self.device_id is not None:
+                _LAST_OK[self.device_id] = combo
             return
         err = DeviceOpenError(self.device_name, self.attempts, self.device_info())
         raise err from last_err
 
     # ------------------------------------------------------------ 여는 방법
+    def _mix_not_extensible(self) -> str:
+        """믹스 형식을 읽을 수 있고 확장 형식(태그 0xfffe, cbSize 22)이 아니면 그 설명, 아니면 ''."""
+        if self._mf is None:
+            return ""
+        try:
+            mix = self._mix_format()
+        except Exception:
+            return ""
+        if mix and "tag" in mix and "cbSize" in mix and (mix["tag"] != "0xfffe" or mix["cbSize"] != 22):
+            return f"태그 {mix.get('tag')}, cbSize {mix.get('cbSize')}"
+        return ""
+
+    def _release_failed(self, rec) -> None:
+        """Initialize 뒤 __enter__ 에서 실패한 recorder 의 COM 객체를 돌려줍니다."""
+        if rec is None or self._mf is None:
+            return
+        for attr in ("_ppCaptureClient", "_ptr"):
+            ptr = getattr(rec, attr, None)
+            if ptr is not None:
+                try:
+                    self._mf._com.release(ptr)
+                except Exception:
+                    pass
+
     def _mix_format(self) -> dict:
         """장치 믹스 형식(공유 모드). 한 번만 읽습니다."""
         if self._mix is None:

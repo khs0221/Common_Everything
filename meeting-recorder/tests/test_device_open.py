@@ -7,6 +7,13 @@ from mrec.devices import (OPEN_COMBOS, DeviceOpenError, FakeBackend, _SoundcardS
                           pack_float_format, parse_wave_format)
 
 
+@pytest.fixture(autouse=True)
+def _clear_last_ok():
+    devices._LAST_OK.clear()
+    yield
+    devices._LAST_OK.clear()
+
+
 class FakeRec:
     def __init__(self, sr, ch):
         self.sr, self.ch = sr, ch or 2
@@ -130,3 +137,20 @@ def test_check_device_ok_and_failure():
     r = check_device(Bad(), "mic", "id", seconds=0.2)
     assert not r["ok"] and r["attempts"][0]["type"] == "AssertionError"
     assert "열지 못함" in check_text(r) and "AssertionError()" in check_text(r)
+
+
+def test_non_extensible_mix_skips_soundcard_and_reconnect_starts_with_last_ok(monkeypatch):
+    """R6(감사 R5 N1): 확장 형식이 아니면 새는 soundcard 경로를 건너뛰고, 다시 열 때는 마지막 성공 방법부터."""
+    devices._LAST_OK.clear()
+    m = Mic(lambda sr, ch, b: True)
+    monkeypatch.setattr(devices, "read_mix_format", lambda mic, mf: {"tag": "0x3", "cbSize": 0, "channels": 1, "rate": 48000})
+    made = []
+    monkeypatch.setattr(devices, "make_direct_recorder", lambda mic, mf, sr, ch, buf: made.append(sr) or FakeRec(sr, ch))
+    src = _SoundcardSource(m, mf=object())
+    assert m.calls == []  # soundcard recorder() 를 부르지 않음
+    assert src.combo.startswith("direct/16000Hz") and src.attempts[0]["type"] == "건너뜀"
+    m2 = Mic(lambda sr, ch, b: False)  # 같은 장치 id, 이번에는 soundcard 도 될 수 있어도
+    monkeypatch.setattr(devices, "read_mix_format", lambda mic, mf: {"tag": "0xfffe", "cbSize": 22, "channels": 1, "rate": 48000})
+    src2 = _SoundcardSource(m2, mf=object())
+    assert src2.combo.startswith("direct/16000Hz") and m2.calls == []  # 마지막 성공 방법부터
+    devices._LAST_OK.clear()
