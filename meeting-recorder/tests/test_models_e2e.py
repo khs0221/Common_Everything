@@ -139,19 +139,21 @@ def test_fixed_language_skips_detection(samples, tmp_path):
     assert meta["language"] == "en" and {u.lang for u in utts} == {"en"}
 
 
-def test_turbo_default_with_base_language_detection_and_hints(samples, tmp_path):
-    """기본(large-v3-turbo) + 언어 판별 base + 용어 힌트: 혼합 언어 표본이 그대로 통과하고 meta 가 맞아야 합니다(R4)."""
+def test_turbo_default_with_small_language_detection_and_hints(samples, tmp_path):
+    """기본(large-v3-turbo) + 언어 판별 small + 용어 힌트: 혼합 언어 표본이 그대로 통과하고 meta 가 맞아야 합니다(R4)."""
     from mrec import selftest
 
     folder = tmp_path / "med"
     folder.mkdir()
     shutil.copy(samples / "sample_mixed_lang.flac", folder / "mix.flac")
     job = pipeline.Job(folder, folder / "mix.flac", None, language=None)
-    assert job.model == "turbo" and job.lid_model == "base"
+    assert job.model == "turbo" and job.lid_model == "small"
     pipeline.run(job)
     utts, meta, _ = output.load_result_json(folder)
-    sc = selftest.score_languages(json.loads((samples / "sample_mixed_lang_truth.json").read_text(encoding="utf-8")), utts)
+    mtruth = json.loads((samples / "sample_mixed_lang_truth.json").read_text(encoding="utf-8"))
+    sc = selftest.score_languages(mtruth, utts)
     assert sc["en_as_hangul"] == 0 and sc["ok"] == sc["n"], sc
+    assert selftest.extra_sentences(mtruth, utts) == []  # 감사 R6 I2: 끝에 "감사합니다." 가 덧붙지 않음
     assert meta["model"] == "turbo" and "language_detection" in meta
     for name in (output.RECORD_MD, output.TRANSCRIPT_TXT, output.COPILOT_TXT, output.GUIDE_MD):
         assert (folder / name).is_file()
@@ -165,3 +167,50 @@ def test_no_glossary_files_still_works(samples, tmp_path, monkeypatch):
     utts, meta, _ = output.load_result_json(folder)
     assert utts and "hints" not in meta
     assert "=== 용어 목록 시작 ===" not in (folder / output.COPILOT_TXT).read_text(encoding="utf-8-sig")
+
+
+def test_short_utterance_language_detection(samples):
+    """감사 R6 I1: 1초·1.5초·2초 짧은 발언(한국어·영어)의 언어 판별(판별 모델 small, 기준 0.6).
+
+    혼합 언어 표본의 정답 발언마다 앞에서부터 같은 길이 조각을 최대 3개 잘라, 조각 하나만으로 판별합니다
+    (이웃 조각이 없는 가장 나쁜 경우). 수정 1회차 측정: small 은 영어 조각을 한국어로 판별한 것이 0건,
+    '확실한데 틀림' 0건, 2초 조각은 모두 맞음. base(0.7~0.9)는 1초·1.5초에서 영어를 한국어로 1건씩 판별해
+    이 시험을 통과하지 못합니다(사용자가 겪은 '영어가 한글로 적힘' 방향).
+    """
+    import soundfile as sf
+
+    from mrec import langid, models
+    from mrec.paths import models_dir
+    from mrec.transcribe import Transcriber
+
+    lid = pipeline.LID_MODEL
+    assert lid == "small"
+    tr = Transcriber(model_dir=models_dir() / models.WHISPER_DIRS[lid], model=lid)
+    probe = langid.WhisperLangProbe(tr.model)
+    conf = langid.CONF_BY_MODEL[lid]
+    x, sr = sf.read(samples / "sample_mixed_lang.flac", dtype="float32")
+    assert sr == 16000
+    truth = json.loads((samples / "sample_mixed_lang_truth.json").read_text(encoding="utf-8"))
+    res = {}
+    for length in (1.0, 1.5, 2.0):
+        r = {"ko": [0, 0, 0], "en": [0, 0, 0]}  # 조각 수, 틀림, 확실한데 틀림
+        n = int(length * sr)
+        for t in truth:
+            a, b = int(t["start"] * sr), int(t["end"] * sr)
+            for k in range(3):
+                s0 = a + k * n
+                if s0 + n > b:
+                    break
+                pieces = langid.split_segment(x[s0:s0 + n], 0.0, length, probe, conf)
+                filled = langid.fill_unsure(pieces)
+                q = r[t["lang"]]
+                q[0] += 1
+                q[1] += filled[0].lang != t["lang"]
+                q[2] += pieces[0].sure and pieces[0].lang != t["lang"]
+        res[length] = r
+    for length, r in res.items():
+        assert r["ko"][0] >= 8 and r["en"][0] >= 8, res
+        assert r["en"][1] == 0, (length, res)  # 영어를 한국어로(한글로 적힘) 0건
+        assert r["ko"][2] == 0 and r["en"][2] == 0, (length, res)  # 확실한데 틀림 0건(이웃으로도 못 고침)
+    assert res[2.0]["ko"][1] == 0 and res[2.0]["en"][1] == 0, res
+    assert res[1.0]["ko"][1] <= 5 and res[1.5]["ko"][1] <= 2, res  # 수정 1회차 측정값(더 나빠지지 않게)

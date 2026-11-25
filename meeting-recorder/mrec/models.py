@@ -11,16 +11,16 @@ from pathlib import Path
 
 from .paths import models_dir
 
-WHISPER_BASE_DIR = "faster-whisper-base"                    # 발언 단위 언어 판별 전용(R6, small 대신)
+WHISPER_SMALL_DIR = "faster-whisper-small"                  # 발언 단위 언어 판별 전용(R6 수정: base → small 로 되돌림)
 WHISPER_TURBO_DIR = "faster-whisper-large-v3-turbo-int8"    # 글로 옮기기(large-v3-turbo, int8 저장, R6)
-WHISPER_DIR = WHISPER_BASE_DIR  # 토크나이저(용어 힌트 토큰 수 세기). small·base 의 tokenizer.json 은 같은 파일
-WHISPER_DIRS = {"base": WHISPER_BASE_DIR, "turbo": WHISPER_TURBO_DIR}
+WHISPER_DIR = WHISPER_SMALL_DIR  # 토크나이저(용어 힌트 토큰 수 세기)
+WHISPER_DIRS = {"small": WHISPER_SMALL_DIR, "turbo": WHISPER_TURBO_DIR}
 SEGMENTATION = "sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx"
 EMBEDDING = "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
 VAD = "silero_vad.onnx"
 
 GH = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
-HF_BASE = "https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66"
+HF_SMALL = "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120"
 # turbo int8: 원본 openai/whisper-large-v3-turbo(MIT, 아래 커밋)를 빌드 때 CTranslate2 변환기로 직접 int8 저장
 # (tools/convert_turbo_int8.py, 고정한 판의 변환 도구로 같은 바이트가 나옴을 확인). 받는 주소가 없고 'convert' 로 표시.
 OPENAI_TURBO = "https://huggingface.co/openai/whisper-large-v3-turbo/resolve/41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
@@ -44,14 +44,15 @@ class ModelFile:
 
 # 해시는 받거나 변환해 확인한 값입니다(2026-11-23~25).
 FILES: tuple[ModelFile, ...] = (
-    # base: 언어 판별 전용(R6). Systran/faster-whisper-base, license: mit
-    ModelFile(f"{WHISPER_BASE_DIR}/model.bin", f"{HF_BASE}/model.bin",
-              "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9"),
-    ModelFile(f"{WHISPER_BASE_DIR}/config.json", f"{HF_BASE}/config.json",
-              "56a6d8110d311f19c8f0471e562832c7527f146b567275bfca59fcf7c184da9a"),
-    ModelFile(f"{WHISPER_BASE_DIR}/tokenizer.json", f"{HF_BASE}/tokenizer.json",
+    # small: 언어 판별 전용. Systran/faster-whisper-small, license: mit(R6 수정 1회차: base 는 짧은 발언에서
+    # 영어를 한국어로 판별하는 경우가 있어 되돌림)
+    ModelFile(f"{WHISPER_SMALL_DIR}/model.bin", f"{HF_SMALL}/model.bin",
+              "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671"),
+    ModelFile(f"{WHISPER_SMALL_DIR}/config.json", f"{HF_SMALL}/config.json",
+              "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828"),
+    ModelFile(f"{WHISPER_SMALL_DIR}/tokenizer.json", f"{HF_SMALL}/tokenizer.json",
               "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"),
-    ModelFile(f"{WHISPER_BASE_DIR}/vocabulary.txt", f"{HF_BASE}/vocabulary.txt",
+    ModelFile(f"{WHISPER_SMALL_DIR}/vocabulary.txt", f"{HF_SMALL}/vocabulary.txt",
               "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"),
     # large-v3-turbo int8 저장본(R6): 빌드 때 변환. preprocessor_config.json(멜 128개 설정) 포함
     ModelFile(f"{WHISPER_TURBO_DIR}/model.bin", "", "7482f978f9493b93b3d0bf68a148a1a62ca02547e8ee981358ff8ef2de8a9418",
@@ -94,12 +95,12 @@ def missing_models(root: Path | None = None) -> list[str]:
 def missing_for(model: str, auto_language: bool = True, root: Path | None = None) -> list[str]:
     """이 처리에 필요한 파일 중 없는 것(감사 R4 E2: 한 모델만 없어도 다른 품질은 쓸 수 있게).
 
-    필요한 것: whisper 가 아닌 모델(화자 분리·VAD) + 고른 whisper 모델 + 언어 자동이면 판별용 base.
+    필요한 것: whisper 가 아닌 모델(화자 분리·VAD) + 고른 whisper 모델 + 언어 자동이면 판별용 small.
     """
     root = root or models_dir()
     need_dirs = {WHISPER_DIRS[model]}
     if auto_language:
-        need_dirs.add(WHISPER_DIRS["base"])
+        need_dirs.add(WHISPER_DIRS["small"])
     all_dirs = set(WHISPER_DIRS.values())
     out = []
     for f in FILES:

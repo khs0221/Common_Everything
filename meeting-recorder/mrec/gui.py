@@ -24,7 +24,7 @@ log = logging.getLogger("mrec")
 LANG_CHOICES = [("자동(영어/한국어)", None), ("영어", "en"), ("한국어", "ko")]
 SPK_CHOICES = [("자동", None)] + [(f"{n}명", n) for n in range(1, 9)]
 # 처리 품질: (화면 이름, 설정 값, whisper 모델)
-# R6: '빠름'(small)을 없애고 large-v3-turbo 하나만 씁니다(묶음 크기 축소). 언어 판별은 base.
+# R6: '빠름'(small)을 없애고 large-v3-turbo 하나만 씁니다(묶음 크기 축소). 언어 판별은 small.
 TRANSCRIBE_MODEL = "turbo"
 # 예상 처리 시간(녹음 길이 대비). 측정 근거: docs/라운드/R4/changes.md. 사용자 PC 는 더 느릴 수 있습니다.
 SPEED_NOTE = "처리 시간: 녹음 길이의 약 {m}배(4코어 기준 측정. 코어가 많으면 더 빠름)"

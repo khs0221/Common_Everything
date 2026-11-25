@@ -155,7 +155,7 @@ def test_missing_for_allows_other_quality(tmp_path):
             p = tmp_path / f.rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(b"x")
-    assert models.missing_for("base", False, tmp_path) == []           # 판별 모델은 있음
+    assert models.missing_for("small", False, tmp_path) == []           # 판별 모델은 있음
     assert models.missing_for("turbo", True, tmp_path)                 # 옮기기 모델이 없으면 막힘
     assert all(m.startswith(models.WHISPER_TURBO_DIR) for m in models.missing_for("turbo", True, tmp_path))
 
