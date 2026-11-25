@@ -1,6 +1,7 @@
 """모델을 실제로 돌리는 시험(합성 표본 음성). 모델이 없으면 '실행 안 함'으로 따로 표시됩니다."""
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -263,12 +264,56 @@ def test_short_korean_between_english_never_written_in_wrong_script(short_ko_run
     assert selftest.score_languages(en_rows, utts)["ok"] == len(en_rows), sc  # 영어 발언은 모두 영어로
 
 
-@pytest.mark.xfail(strict=False, reason="알려진 한계(R6 수정 1회차 측정): 이웃이 영어인 1.5초 한국어 조각 중 "
-                   "판별이 '불확실'인 것은 이웃 보정으로 영어 묶음에 들어가고, turbo 가 영어로 옮기며 글을 내지 않아 "
-                   "빠집니다(리눅스 6개 중 2개, 1초 조각이면 6개 중 4개). 고치면 이 시험이 통과합니다.")
 def test_short_korean_between_english_is_not_lost(short_ko_run):
+    """R6 수정 2회차: 이웃이 영어인 1.5초 한국어 조각 중 판별이 '불확실'이라 영어 묶음에 들어가 글이 나오지
+    않던 것(수정 전 6개 중 2개 빠짐)을, 그 조각만 언어 자동으로 다시 옮겨 채웁니다(transcribe.recheck_unsure)."""
     from mrec import selftest
 
     truth, utts = short_ko_run
     sc = selftest.score_languages(truth, utts)
     assert sc["missing"] == 0, sc
+
+
+def test_short_and_quiet_speech_not_dropped_by_guard(monkeypatch, tmp_path):
+    """감사 R6 재감사 G1·G4: 짧은 말(한두 어절, 한국어·영어 각 8개)과 작은 목소리(-20dB 구절, -26dB 문장)에서
+    거르기가 실제 발언을 하나도 버리지 않아야 합니다(거르기 끔 대비 추가 손실 0). 거르기는 옮긴 뒤 글을 빼기만
+    하므로, 버린 글이 정답 구절과 겹치지 않으면 끔과 결과가 같습니다."""
+    import sys
+
+    import numpy as np
+    import soundfile as sf
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import shortspeech as ss
+
+    from mrec import transcribe
+
+    dropped = []
+    orig = transcribe.HallucinationGuard.reject
+
+    def rec(self, seg):
+        r = orig(self, seg)
+        if r:
+            dropped.append(seg.text)
+        return r
+
+    monkeypatch.setattr(transcribe.HallucinationGuard, "reject", rec)
+    y1, t1 = ss.build(ss.SHORT, (0, -20))
+    y2, t2 = ss.build(ss.SENTENCES, (-26,))
+    off = len(y1) / ss.SR
+    y = np.concatenate([y1, y2])
+    truth = t1 + [{**t, "start": t["start"] + off, "end": t["end"] + off} for t in t2]
+    sf.write(tmp_path / "t.flac", y, ss.SR)
+    r = pipeline.run(pipeline.Job(tmp_path, tmp_path / "t.flac", None, language=None))
+    utts = output.load_result_json(tmp_path)[0]
+    assert dropped == [] and r.dropped_text == 0, dropped
+    f = ss.found(truth, utts)
+    # 적힌 수는 거르기와 무관하게(끔과 같음) 말소리 찾기·인식에 달려 있습니다. 한 트랙에 섞으면 작은 부분은
+    # 말소리 찾기 기준(트랙 전체 크기)에 따라 달라집니다. 수정 2회차 측정(리눅스, 이 구성): 0dB 15/16, -20dB 11/16.
+    # 수준별 따로 처리한 측정은 changes.md(0dB 15/16, -10~-26dB 16/16, -16~-26dB 문장 6/6, 켬·끔 같음).
+    # 여기서는 정상 크기 짧은 말이 크게 줄지 않았는지만 봅니다.
+    assert sum(f[:16]) >= 13, list(zip([t["text"] for t in truth], f))
+    from mrec import selftest
+
+    sc = selftest.score_languages(truth, utts)
+    assert sc["en_as_hangul"] == 0 and sc["ko_as_latin"] == 0, sc

@@ -43,6 +43,7 @@ class Job:
     lid_model: str | None = LID_MODEL  # 언어 판별 모델(None 이면 model 과 같음)
     hints: bool = True              # 용어 힌트(glossary/hint_terms.txt) 사용
     mark_low_conf: bool = MARK_LOW_CONF_DEFAULT  # 대화록.txt·Copilot용.txt 에 확신 낮은 단어 (?) 표시
+    guard: bool = True              # 소리가 거의 없는 30초 창의 글 거르기(설정 "tail_text_guard")
 
 
 @dataclass
@@ -52,6 +53,15 @@ class JobResult:
     speakers: list[str]
     timings: dict
     audio_seconds: float
+    dropped_text: int = 0  # 소리가 거의 없는 창이라 뺀 글 수(화면 요약용)
+
+
+def done_summary(res: JobResult) -> str:
+    """처리 결과 요약(화면). 소리가 거의 없는 창에서 뺀 글이 있으면 건수를 함께 보입니다(감사 R6 G2)."""
+    text = f"끝났습니다. 발언 {res.utterances}개, 상대방 {len(res.speakers)}명으로 구분했습니다."
+    if res.dropped_text:
+        text += f" 말소리 없는 구간의 글 {res.dropped_text}건 제외."
+    return text
 
 
 class _Progress:
@@ -133,6 +143,7 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
 
         # 4) 언어 판별(자동일 때) → 글로 옮기기. 두 모델을 동시에 메모리에 올리지 않습니다.
         mic_out, loop_out = [], []
+        dropped: dict = {"mic": [], "loop": []}  # 거른 글의 원래 시각(트랙별)
         lang_stats: dict = {}
         hint = {}
         if mic_segs or loop_segs:  # 말소리가 하나도 없으면 모델을 읽지 않습니다
@@ -140,6 +151,7 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
 
             lid_name = job.lid_model or job.model
             runs = {"mic": None, "loop": None}
+            unsure = {"mic": None, "loop": None}
             pr.step(3)
             t = time.monotonic()
             tr = None
@@ -150,6 +162,7 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
                         runs[key] = lid.detect_language_runs(wav, segs, cancel=cancel,
                                                              progress=lambda f, w0=w0: pr.part(w0 + f * 0.5))
                         lang_stats[key] = lid.last_lang_stats
+                        unsure[key] = lid.last_unsure
                 if lid_name == job.model:
                     tr = lid  # 같은 모델이면 다시 읽지 않음
                 else:
@@ -165,19 +178,24 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
             else:
                 tr.hotwords = hint.get("hotwords")
                 tr.hint_vocab_text = hint.get("terms_text")
+            tr.guard = bool(job.guard)
             timings["load_asr"] = time.monotonic() - t
             pr.step(5)
             t = time.monotonic()
             if mic16 and mic_segs:
                 mic_out = tr.transcribe_file(mic16, mic_segs, job.language, words=True,
-                                             progress=pr.part, cancel=cancel, runs=runs["mic"])
+                                             progress=pr.part, cancel=cancel, runs=runs["mic"],
+                                             recheck=unsure["mic"])
             timings["asr_mic"] = time.monotonic() - t
+            dropped["mic"], tr.dropped = [round(t0, 1) for t0, _ in tr.dropped], []
             pr.step(6)
             t = time.monotonic()
             if loop16 and loop_segs:
                 loop_out = tr.transcribe_file(loop16, loop_segs, job.language, words=True,
-                                              progress=pr.part, cancel=cancel, runs=runs["loop"])
+                                              progress=pr.part, cancel=cancel, runs=runs["loop"],
+                                              recheck=unsure["loop"])
             timings["asr_loop"] = time.monotonic() - t
+            dropped["loop"], tr.dropped = [round(t0, 1) for t0, _ in tr.dropped], []
             del tr
             gc.collect()
 
@@ -196,6 +214,12 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         meta["model"] = job.model
         meta["low_conf_marks"] = bool(job.mark_low_conf)
         meta["vad_gain"] = gains
+        n_dropped = sum(len(v) for v in dropped.values())
+        meta["tail_text_guard"] = {"on": bool(job.guard), "dropped": n_dropped,
+                                   "times": {k: v for k, v in dropped.items() if v}}
+        if n_dropped:  # 시각만 기록(글은 회의 내용이라 남기지 않음)
+            log.info("말소리 없는 구간의 글 %d건 제외: %s", n_dropped,
+                     ", ".join(f"{k} {t:.1f}초" for k, v in dropped.items() for t in v))
         if hint:
             meta["hints"] = {k: hint[k] for k in ("used", "dropped", "file", "read") if k in hint}
         names = {}
@@ -212,7 +236,7 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         # 기술 정보만 기록(회의 내용 없음)
         log.info("처리 완료: 길이 %.0f초, 발언 %d개, 참석자 %d명, 소요 %.0f초",
                  audio_seconds, len(utts), len(merge.speakers_in(utts)), timings["total"])
-        return JobResult(outs, len(utts), merge.speakers_in(utts), timings, audio_seconds)
+        return JobResult(outs, len(utts), merge.speakers_in(utts), timings, audio_seconds, n_dropped)
     finally:
         for p in work.glob("*"):
             try:

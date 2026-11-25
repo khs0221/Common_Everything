@@ -498,6 +498,7 @@ class App:
             return
         job.model = model
         job.mark_low_conf = bool(self.settings.get("mark_low_conf", pipeline.MARK_LOW_CONF_DEFAULT))
+        job.guard = bool(self.settings.get("tail_text_guard", True))  # 설정 파일에서 false 로 끌 수 있음
         self._update_glossary_note()  # 사용자가 용어 파일을 고쳤을 수 있음
         self.settings.update({"language": self._lang(), "auto_process": bool(self.auto_var.get())})
         paths.save_settings(self.settings)
@@ -565,7 +566,7 @@ class App:
         self.prog["value"] = 100
         self.names_btn.configure(state="normal")
         n = len(res.speakers)
-        self.prog_var.set(f"끝났습니다. 발언 {res.utterances}개, 상대방 {n}명으로 구분했습니다.")
+        self.prog_var.set(pipeline.done_summary(res))
         self.status.set(f"결과: {self.last_folder}")
         if n and messagebox.askyesno("참석자 이름", f"상대방을 {n}명으로 구분했습니다.\n지금 참석자 이름을 정할까요?"):
             self.edit_names()
