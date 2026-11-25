@@ -131,3 +131,30 @@ def test_status_shows_read_and_used_counts(tmp_path):
     (tmp_path / glossary.HINT_FILE).write_text("A1\nB2\n" + "x" * 80 + "\n", encoding="utf-8")
     t = glossary.status_text(tmp_path)
     assert "2개 읽음 중 2개 사용" in t and "너무 긴 줄 1개" in t
+
+
+def test_utf16_files_are_read(tmp_path):
+    for enc, bom in (("utf-16", True), ("utf-16-le", False), ("utf-16-be", False)):
+        p = tmp_path / f"t_{enc}.txt"
+        p.write_bytes("# 주석\nCpk\nUN 38.3\n".encode(enc))
+        assert glossary.read_terms(p) == ["Cpk", "UN 38.3"], enc
+
+
+def test_unreadable_file_is_reported(tmp_path):
+    (tmp_path / glossary.HINT_FILE).write_bytes(b"\x81\xff\xfe\x80\x80abc\x9f\xff")
+    terms, st = glossary.read_terms_stats(tmp_path / glossary.HINT_FILE)
+    assert terms == [] and st["unreadable"]
+    assert "hint_terms.txt 읽지 못함" in glossary.status_text(tmp_path)
+
+
+def test_missing_for_allows_other_quality(tmp_path):
+    from mrec import models
+
+    for f in models.FILES:
+        if not f.rel.startswith(models.WHISPER_TURBO_DIR):
+            p = tmp_path / f.rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"x")
+    assert models.missing_for("small", True, tmp_path) == []           # 빠름은 쓸 수 있음
+    assert models.missing_for("turbo", True, tmp_path)                 # 정확은 막힘
+    assert all(m.startswith(models.WHISPER_TURBO_DIR) for m in models.missing_for("turbo", True, tmp_path))
