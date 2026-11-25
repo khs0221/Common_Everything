@@ -34,12 +34,14 @@ def test_key_changes_when_content_changes(tmp_path):
 
 def test_cli_prints_and_appends_github_output(tmp_path):
     gh = tmp_path / "gh_output"
-    gh.write_text("before=1\n", encoding="utf-8")
+    gh.write_bytes(b"before=1\n")  # write_text 는 윈도우에서 \r\n 으로 저장되므로 바이트로(수정 1회차 CI)
     env = {**__import__("os").environ, "GITHUB_OUTPUT": str(gh)}
     out = subprocess.run([sys.executable, str(ROOT / "tools" / "ci_cache_key.py")],
                          capture_output=True, text=True, check=True, env=env).stdout.strip()
     assert out == f"key={ci_cache_key.cache_key()}"
+    # 도구가 덧붙이는 줄은 운영체제와 무관하게 LF 하나로 끝남(러너는 LF·CRLF 모두 읽지만 값에 \r 이 섞이지 않게)
     assert gh.read_bytes() == f"before=1\nkey={ci_cache_key.cache_key()}\n".encode()
+    assert b"\r" not in gh.read_bytes()
 
 
 def test_workflow_uses_key_tool_not_hashfiles():
