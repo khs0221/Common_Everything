@@ -18,13 +18,45 @@ concurrency:
   group: meeting-recorder-${{ github.ref }}
   cancel-in-progress: true
 
-# exe 묶음(약 540MB)은 수동 실행과 기본 브랜치 push 때만 올립니다. 그 밖의 push·PR 은 시험과
+# exe 묶음(약 1.1GB)은 수동 실행과 기본 브랜치 push 때만 올립니다. 그 밖의 push·PR 은 시험과
 # exe 자체 시험까지만 합니다(R3).
 env:
   UPLOAD_BUNDLE: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
 
 jobs:
+  convert-turbo:
+    # large-v3-turbo 를 int8 로 저장한 모델을 만듭니다(R6). 리눅스에서 고정한 판의 변환 도구로 변환하고
+    # 결과 해시를 mrec/models.py 와 비교합니다. 결과는 운영체제 공용 캐시로 윈도우 빌드에 넘깁니다.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: meeting-recorder
+    steps:
+      - uses: actions/checkout@v4
+      - name: turbo int8 캐시
+        id: turbo
+        uses: actions/cache@v4
+        with:
+          path: meeting-recorder/models/faster-whisper-large-v3-turbo-int8
+          key: mrec-turbo-int8-${{ hashFiles('meeting-recorder/mrec/models.py', 'meeting-recorder/tools/convert_turbo_int8.py', 'meeting-recorder/requirements-convert.txt') }}
+          enableCrossOsArchive: true
+      - uses: actions/setup-python@v5
+        if: steps.turbo.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12"
+      - name: 변환(원본 받기·해시 확인·int8 저장·결과 해시 확인)
+        if: steps.turbo.outputs.cache-hit != 'true'
+        timeout-minutes: 35
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-convert.txt
+          for i in 1 2 3; do python -u tools/convert_turbo_int8.py && exit 0; echo "::warning::변환 실패($i/3)"; sleep 30; done
+          exit 1
+
   build:
+    needs: convert-turbo
     # 같은 저장소 브랜치의 PR 은 그 브랜치 push 로 이미 돌았으므로 건너뜁니다(같은 커밋 두 번 빌드 방지).
     # 다른 저장소에서 온 PR(포크)만 pull_request 로 돕니다.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
@@ -54,10 +86,20 @@ jobs:
           python -m pip install -r requirements-build.txt
           python -m pip list
 
-      - name: 모델 캐시
+      - name: turbo int8(변환 작업에서 만든 것)
+        uses: actions/cache/restore@v4
+        with:
+          path: meeting-recorder/models/faster-whisper-large-v3-turbo-int8
+          key: mrec-turbo-int8-${{ hashFiles('meeting-recorder/mrec/models.py', 'meeting-recorder/tools/convert_turbo_int8.py', 'meeting-recorder/requirements-convert.txt') }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: 모델 캐시(그 밖의 모델)
         uses: actions/cache@v4
         with:
-          path: meeting-recorder/models
+          path: |
+            meeting-recorder/models
+            !meeting-recorder/models/faster-whisper-large-v3-turbo-int8
           key: mrec-models-${{ hashFiles('meeting-recorder/mrec/models.py') }}
 
       - name: 모델 받기(해시 확인)
@@ -119,7 +161,7 @@ jobs:
           if (Test-Path $dist) {
             $mb = (Get-ChildItem -Recurse $dist | Measure-Object -Property Length -Sum).Sum / 1MB
             Write-Host ("전체 크기(압축 전): {0:N0} MB" -f $mb)
-            foreach ($m in @("faster-whisper-small", "faster-whisper-large-v3-turbo")) {
+            foreach ($m in @("faster-whisper-base", "faster-whisper-large-v3-turbo-int8")) {
               if (Test-Path "$dist/models/$m/model.bin") { Write-Host "포함: $m" } else { Write-Host "::error::$m 이 묶음에 없습니다" }
             }
             Get-ChildItem "$dist/_internal" -Directory | ForEach-Object {

@@ -86,6 +86,10 @@ def main(target: Path) -> int:
             if out.is_file() and (not f.sha256 or sha256(out) == f.sha256):
                 print(f"있음: {f.rel}")
                 continue
+            if f.convert:  # 받는 파일이 아니라 빌드 때 변환해 만드는 파일(tools/convert_turbo_int8.py)
+                print(f"변환 파일 없음 또는 해시 다름: {f.rel} (tools/convert_turbo_int8.py 로 만드십시오)")
+                bad.append(f.rel)
+                continue
             if f.url not in cache:
                 print(f"받는 중: {f.url}")
                 p = tmp / f"dl_{len(cache)}"

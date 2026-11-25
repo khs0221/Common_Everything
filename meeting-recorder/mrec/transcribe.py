@@ -55,9 +55,9 @@ class Segment:
 
 class Transcriber:
     def __init__(self, model_dir: Path | None = None, threads: int | None = None, beam_size: int = 1,
-                 model: str = "small", hotwords: str | None = None, hint_langs: tuple[str, ...] = ("en",),
+                 model: str = "turbo", hotwords: str | None = None, hint_langs: tuple[str, ...] = ("en",),
                  hint_vocab_text: str | None = None):
-        """model: 'small'(빠름) 또는 'turbo'(정확, large-v3-turbo). hotwords: 인식 힌트 문자열(hint_langs 언어 묶음에만)."""
+        """model: 'turbo'(글로 옮기기) 또는 'base'(발언 단위 언어 판별 전용). hotwords: 인식 힌트 문자열(hint_langs 언어 묶음에만)."""
         _stub_optional_imports()
         from faster_whisper import WhisperModel
 
@@ -202,7 +202,7 @@ class Transcriber:
             if cancel and cancel():
                 raise InterruptedError
             audio = read_segment(wav16k, a, b)
-            pieces.extend(langid.split_segment(audio, a, b, probe))
+            pieces.extend(langid.split_segment(audio, a, b, probe, langid.CONF_BY_MODEL.get(self.model_name)))
             done += b - a
             if progress:
                 progress(done / total)

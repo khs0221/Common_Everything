@@ -300,16 +300,6 @@ def run(out_path: str | None = None) -> int:
             _check(results, "혼합 언어(한↔영 전환) 발언별 언어", sc["ok"] == sc["n"] and sc["en_as_hangul"] == 0,
                    f"{sc}")
 
-            # 빠름(small) 모델도 묶음에 있고 동작하는지(R4: 정확=large-v3-turbo 기본, 빠름=small)
-            fast = tmp / "회의_빠름"
-            fast.mkdir()
-            t = time.monotonic()
-            pipeline.run(pipeline.Job(fast, sdir / "sample_mic.flac", None, language="en", model="small"))
-            report["fast_model_seconds"] = round(time.monotonic() - t, 1)
-            ftxt = (fast / output.COPILOT_TXT).read_text(encoding="utf-8-sig").lower()
-            fmeta = output.load_result_json(fast)[1]
-            _check(results, "빠름(small) 모델로 글 옮기기",
-                   fmeta.get("model") == "small" and "finance" in ftxt and "friday" in ftxt)
             report["model_used_main"] = output.load_result_json(folder)[1].get("model")
     except Exception:
         _check(results, "예외 없음", False, traceback.format_exc()[-2000:])

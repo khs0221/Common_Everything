@@ -22,11 +22,10 @@ log = logging.getLogger("mrec")
 # 단계별 진행률 비중(합 1.0)
 STEPS = [("준비", 0.02), ("말소리 찾기", 0.04), ("발언자 구분", 0.10), ("언어 판별", 0.04), ("모델 읽기", 0.02),
          ("나(마이크) 글로 옮기기", 0.33), ("상대방(스피커) 글로 옮기기", 0.43), ("결과 쓰기", 0.02)]
-MODELS = {"accurate": "turbo", "fast": "small"}  # 화면의 처리 품질 → whisper 모델
-LID_MODEL = "small"
+LID_MODEL = "base"  # 발언 단위 언어 판별 전용(R6 측정: small 과 같은 64/64, 3배 빠름. 기준값은 langid.CONF_BY_MODEL)
 # 확신 낮은 단어 (?) 표시: 측정에서 표시 정확도(정밀도) 0.5 이하·틀린 단어 중 표시 비율 0.12~0.32 로 쓸모가
 # 작아 기본으로 끕니다(화면에도 두지 않음). 기능은 남겨 두어 처리결과.json 의 marked 로 다시 쓸 수 있습니다.
-MARK_LOW_CONF_DEFAULT = False  # 발언 단위 언어 판별은 small 로(측정 근거: R4 changes.md)
+MARK_LOW_CONF_DEFAULT = False
 
 ProgressCb = Callable[[str, float], None]  # (단계 이름, 전체 0~1)
 
@@ -40,7 +39,7 @@ class Job:
     num_speakers: int | None = None  # 스피커 쪽 참석자 수(None=자동)
     beam_size: int = 1
     meta: dict = field(default_factory=dict)
-    model: str = "turbo"            # 글로 옮기는 모델: 'turbo'(정확, large-v3-turbo, 기본) / 'small'(빠름)
+    model: str = "turbo"            # 글로 옮기는 모델: large-v3-turbo(int8 저장)
     lid_model: str | None = LID_MODEL  # 언어 판별 모델(None 이면 model 과 같음)
     hints: bool = True              # 용어 힌트(glossary/hint_terms.txt) 사용
     mark_low_conf: bool = MARK_LOW_CONF_DEFAULT  # 대화록.txt·Copilot용.txt 에 확신 낮은 단어 (?) 표시

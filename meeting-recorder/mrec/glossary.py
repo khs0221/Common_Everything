@@ -131,7 +131,7 @@ _TOKENIZER = None
 
 
 def _count_tokens(text: str) -> int:
-    """whisper 토크나이저로 센 토큰 수(small 기준. large-v3-turbo 와는 거의 같아 개수 추정에 씀)."""
+    """whisper 토크나이저로 센 토큰 수(base 기준. large-v3-turbo 와는 거의 같아 개수 추정에 씀)."""
     global _TOKENIZER
     if _TOKENIZER is None:
         from tokenizers import Tokenizer

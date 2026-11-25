@@ -53,7 +53,7 @@ def test_full_pipeline_on_sample(samples, tmp_path, truth):
     folder.mkdir()
     shutil.copy(samples / "sample_mic.flac", folder / "mic.flac")
     shutil.copy(samples / "sample_loop.flac", folder / "loop.flac")
-    res = pipeline.run(pipeline.Job(folder, folder / "mic.flac", folder / "loop.flac", model="small"))
+    res = pipeline.run(pipeline.Job(folder, folder / "mic.flac", folder / "loop.flac", model="turbo"))
     assert (folder / output.RECORD_MD).is_file() and (folder / output.COPILOT_TXT).is_file()
     assert not (folder / "_작업중").exists()
     utts, meta, _ = output.load_result_json(folder)
@@ -82,7 +82,7 @@ def test_single_file_mode_and_forced_language(samples, tmp_path):
     folder = tmp_path / "one"
     folder.mkdir()
     res = pipeline.run(pipeline.Job(folder, None, samples / "sample_loop.flac", language="en", num_speakers=2,
-                                    model="small"))
+                                    model="turbo"))
     assert res.speakers == ["spk1", "spk2"]
     utts, meta, _ = output.load_result_json(folder)
     assert meta["mode"] == "single_file" and meta["language"] == "en"
@@ -99,7 +99,7 @@ def test_cancel_stops_processing(samples, tmp_path):
         return calls["n"] > 2
 
     with pytest.raises(InterruptedError):
-        pipeline.run(pipeline.Job(folder, samples / "sample_mic.flac", samples / "sample_loop.flac", model="small"),
+        pipeline.run(pipeline.Job(folder, samples / "sample_mic.flac", samples / "sample_loop.flac", model="turbo"),
                      cancel=cancel)
     assert not (folder / output.RECORD_MD).exists()
 
@@ -134,20 +134,20 @@ def test_fixed_language_skips_detection(samples, tmp_path):
     """'영어'로 고정하면 언어 판별을 하지 않고 모두 영어로 처리합니다(기존 동작 유지)."""
     folder = tmp_path / "fixed"
     folder.mkdir()
-    pipeline.run(pipeline.Job(folder, samples / "sample_mic.flac", None, language="en", model="small"))
+    pipeline.run(pipeline.Job(folder, samples / "sample_mic.flac", None, language="en", model="turbo"))
     utts, meta, _ = output.load_result_json(folder)
     assert meta["language"] == "en" and {u.lang for u in utts} == {"en"}
 
 
-def test_turbo_default_with_small_language_detection_and_hints(samples, tmp_path):
-    """기본(정확=large-v3-turbo) + 언어 판별 small + 용어 힌트: 혼합 언어 표본이 그대로 통과하고 meta 가 맞아야 합니다(R4)."""
+def test_turbo_default_with_base_language_detection_and_hints(samples, tmp_path):
+    """기본(large-v3-turbo) + 언어 판별 base + 용어 힌트: 혼합 언어 표본이 그대로 통과하고 meta 가 맞아야 합니다(R4)."""
     from mrec import selftest
 
     folder = tmp_path / "med"
     folder.mkdir()
     shutil.copy(samples / "sample_mixed_lang.flac", folder / "mix.flac")
     job = pipeline.Job(folder, folder / "mix.flac", None, language=None)
-    assert job.model == "turbo" and job.lid_model == "small"
+    assert job.model == "turbo" and job.lid_model == "base"
     pipeline.run(job)
     utts, meta, _ = output.load_result_json(folder)
     sc = selftest.score_languages(json.loads((samples / "sample_mixed_lang_truth.json").read_text(encoding="utf-8")), utts)
@@ -161,7 +161,7 @@ def test_no_glossary_files_still_works(samples, tmp_path, monkeypatch):
     monkeypatch.setenv("MREC_GLOSSARY_DIR", str(tmp_path / "none"))
     folder = tmp_path / "ng"
     folder.mkdir()
-    pipeline.run(pipeline.Job(folder, samples / "sample_mic.flac", None, language="en", model="small"))
+    pipeline.run(pipeline.Job(folder, samples / "sample_mic.flac", None, language="en", model="turbo"))
     utts, meta, _ = output.load_result_json(folder)
     assert utts and "hints" not in meta
     assert "=== 용어 목록 시작 ===" not in (folder / output.COPILOT_TXT).read_text(encoding="utf-8-sig")
