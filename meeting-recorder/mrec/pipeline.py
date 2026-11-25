@@ -44,6 +44,7 @@ class Job:
     hints: bool = True              # 용어 힌트(glossary/hint_terms.txt) 사용
     mark_low_conf: bool = MARK_LOW_CONF_DEFAULT  # 대화록.txt·Copilot용.txt 에 확신 낮은 단어 (?) 표시
     guard: bool = True              # 소리가 거의 없는 30초 창의 글 거르기(설정 "tail_text_guard")
+    recheck_unsure: bool = False    # 불확실 짧은 조각 다시 보기(설정 "recheck_unsure", 기본 끔: changes.md 되돌림)
 
 
 @dataclass
@@ -179,6 +180,7 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
                 tr.hotwords = hint.get("hotwords")
                 tr.hint_vocab_text = hint.get("terms_text")
             tr.guard = bool(job.guard)
+            tr.recheck = bool(job.recheck_unsure)
             timings["load_asr"] = time.monotonic() - t
             pr.step(5)
             t = time.monotonic()
@@ -214,6 +216,7 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         meta["model"] = job.model
         meta["low_conf_marks"] = bool(job.mark_low_conf)
         meta["vad_gain"] = gains
+        meta["recheck_unsure"] = bool(job.recheck_unsure)
         n_dropped = sum(len(v) for v in dropped.values())
         meta["tail_text_guard"] = {"on": bool(job.guard), "dropped": n_dropped,
                                    "times": {k: v for k, v in dropped.items() if v}}

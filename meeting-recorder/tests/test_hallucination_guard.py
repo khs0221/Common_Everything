@@ -1,4 +1,5 @@
 """소리가 거의 없는 30초 창의 글 거르기(R6 수정 2회차, 감사 I2·G1·G2). 모델 없이 가짜 구간으로."""
+from pathlib import Path
 from types import SimpleNamespace as NS
 
 import numpy as np
@@ -73,3 +74,12 @@ def test_done_summary_shows_dropped_count():
     assert done_summary(r) == "끝났습니다. 발언 8개, 상대방 1명으로 구분했습니다."
     r.dropped_text = 2
     assert done_summary(r).endswith("말소리 없는 구간의 글 2건 제외.")
+
+
+def test_recheck_unsure_is_off_by_default():
+    """R6 되돌림: 불확실 조각 다시 보기는 기본 끔(설정 "recheck_unsure": true 로만 켬)."""
+    from mrec.pipeline import Job
+
+    assert transcribe.RECHECK_UNSURE is False
+    assert Job(Path("."), None, None).recheck_unsure is False
+    assert getattr(_tr(), "recheck", transcribe.RECHECK_UNSURE) is False

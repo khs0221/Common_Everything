@@ -499,6 +499,7 @@ class App:
         job.model = model
         job.mark_low_conf = bool(self.settings.get("mark_low_conf", pipeline.MARK_LOW_CONF_DEFAULT))
         job.guard = bool(self.settings.get("tail_text_guard", True))  # 설정 파일에서 false 로 끌 수 있음
+        job.recheck_unsure = bool(self.settings.get("recheck_unsure", False))  # 기본 끔(R6 되돌림)
         self._update_glossary_note()  # 사용자가 용어 파일을 고쳤을 수 있음
         self.settings.update({"language": self._lang(), "auto_process": bool(self.auto_var.get())})
         paths.save_settings(self.settings)

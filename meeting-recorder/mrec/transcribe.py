@@ -54,7 +54,10 @@ class Segment:
 
 
 HALLUCINATION_GUARD = True  # 기본값. 설정 파일(settings.json)의 "tail_text_guard": false 로 끌 수 있음(pipeline.Job.guard)
-RECHECK_UNSURE = True  # '불확실' 조각에서 글이 안 나오면 그 조각만 언어 자동으로 다시 옮김(R6 수정 2회차)
+# '불확실' 조각에서 글이 안 나오면 그 조각만 언어를 다시 보고 옮김(R6 수정 2회차). 윈도우 CI 에서 짧은 말·작은
+# 목소리 트랙의 영어 1개가 한글로 적힌 실행이 있었고(리눅스 재현 안 됨) 원인에서 배제할 수 없어 기본 끔(되돌림).
+# 설정 "recheck_unsure": true 로만 켜집니다(pipeline.Job.recheck_unsure → Transcriber.recheck).
+RECHECK_UNSURE = False
 TAIL_S = 1.0     # 첫 창이 아닌 30초 창에 남은 소리가 이보다 짧을 때만 검사
 MAX_RATE = 20.0  # 초당 말 단위(한글 음절, 영어 낱말) 상한. 빠른 말도 한국어 약 9음절/초, 영어 약 5낱말/초
 FRAME_S = 0.01   # faster-whisper 의 seek 단위(멜 프레임 10ms)
@@ -93,6 +96,7 @@ class Transcriber:
 
         self.model_name = model
         self.guard = True  # 소리가 거의 없는 창의 글 거르기(pipeline.Job.guard)
+        self.recheck = RECHECK_UNSURE  # 불확실 조각 다시 보기(pipeline.Job.recheck_unsure)
         self.dropped: list[tuple[float, str]] = []  # 거른 글 (원래 시각, 글). 글은 기록하지 않음
         self._dropped_now: list[tuple[float, str]] = []
         self.prev_text = False  # condition_on_previous_text(측정 뒤 결정, R4 changes.md)
@@ -241,7 +245,7 @@ class Transcriber:
                 done += sum(b - a for a, b in pack)
                 if progress:
                     progress(base + (1 - base) * done / total)
-        if recheck and RECHECK_UNSURE:
+        if recheck and getattr(self, "recheck", RECHECK_UNSURE):
             out.extend(self.recheck_unsure(wav16k, recheck, out, words, cancel))
         out.sort(key=lambda s: s.start)
         return out
