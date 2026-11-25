@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import sys
 import threading
 import time
@@ -112,39 +113,182 @@ def _run_in_mta(fn, *args, timeout: float = 30.0):
     return box.get("r")
 
 
+@dataclass(frozen=True)
+class OpenCombo:
+    """장치를 여는 한 가지 방법."""
+    method: str            # 'soundcard'(라이브러리 그대로) / 'direct'(형식을 직접 만들어 Initialize)
+    samplerate: int | None  # None = 장치 믹스 형식의 주파수
+    channels: int | None    # None = 장치 믹스 형식의 채널 수(읽은 뒤 모노로 합침)
+    buffer_s: float | None  # WASAPI 버퍼 길이(초). None = soundcard 기본값
+
+    def label(self) -> str:
+        sr = self.samplerate or "장치값"
+        ch = self.channels or "장치값"
+        buf = f"{self.buffer_s}s" if self.buffer_s else "기본"
+        return f"{self.method}/{sr}Hz/{ch}ch/버퍼{buf}"
+
+
+# 열기 순서(R5). 앞의 세 개는 R4 까지와 같아, 지금 열리는 장치는 똑같이 열립니다.
+# 'direct' 는 soundcard 가 장치 믹스 형식을 assert 로 검사하다 문자열 없는 AssertionError 로 실패하는
+# 경우(mediafoundation.py 516~525줄)를 피하려고, 표준 배치(40바이트)의 32비트 float 형식을 직접 만들어
+# 같은 플래그(AUTOCONVERTPCM 등)로 Initialize 합니다.
+OPEN_COMBOS = (
+    OpenCombo("soundcard", 16000, 1, WASAPI_BUFFER_SECONDS),
+    OpenCombo("soundcard", 48000, 1, WASAPI_BUFFER_SECONDS),
+    OpenCombo("soundcard", 44100, 1, WASAPI_BUFFER_SECONDS),
+    OpenCombo("direct", 16000, 1, WASAPI_BUFFER_SECONDS),
+    OpenCombo("direct", 48000, 1, WASAPI_BUFFER_SECONDS),
+    OpenCombo("direct", None, None, WASAPI_BUFFER_SECONDS),
+    OpenCombo("soundcard", 48000, None, None),
+)
+
+
+class DeviceOpenError(RuntimeError):
+    """모든 열기 조합이 실패. attempts(조합별 실패)와 device_info(장치 속성)를 담습니다."""
+
+    def __init__(self, name: str | None, attempts: list[dict], device_info: dict):
+        self.device = name
+        self.attempts = attempts
+        self.device_info = device_info
+        super().__init__(self.describe())
+
+    def describe(self) -> str:
+        lines = [f"장치를 열 수 없습니다(시도한 방법 {len(self.attempts)}가지 모두 실패): {self.device or '?'}"]
+        for a in self.attempts:
+            hr = f", HRESULT {a['hresult']}" if a.get("hresult") else ""
+            where = f" @ {a['where']}" if a.get("where") else ""
+            lines.append(f"- {a['combo']}: {a['type']} {a['repr']}{hr}{where}")
+        if self.device_info:
+            lines.append("장치 속성: " + ", ".join(f"{k}={v}" for k, v in self.device_info.items()))
+        return "\n".join(lines)
+
+
+def describe_exception(e: BaseException) -> dict:
+    """예외 종류·repr·HRESULT·마지막 위치(파일:줄 함수) — 메시지가 빈 예외도 구별되게."""
+    import traceback
+
+    hr = None
+    m = re.search(r"0x[0-9a-fA-F]{8}", str(e))
+    if m:
+        hr = m.group(0).lower()
+    where = ""
+    try:
+        tb = traceback.extract_tb(e.__traceback__)
+        if tb:
+            f = tb[-1]
+            where = f"{os.path.basename(f.filename)}:{f.lineno} {f.name}"
+    except Exception:
+        pass
+    return {"type": type(e).__name__, "repr": repr(e)[:300], "hresult": hr, "where": where}
+
+
+IEEE_FLOAT_GUID = "00000003-0000-0010-8000-00aa00389b71"
+
+
+def pack_float_format(samplerate: int, channels: int) -> bytes:
+    """표준 배치(1바이트 정렬, 40바이트) WAVEFORMATEXTENSIBLE: 32비트 float.
+
+    soundcard 의 cffi 정의는 정렬 차이로 실제 구조보다 4바이트 뒤를 읽으므로(R5 changes.md) 쓰지 않습니다.
+    """
+    import struct
+    import uuid
+
+    mask = {1: 0x4, 2: 0x3}.get(channels, 0)  # 모노=앞 가운데, 스테레오=앞 좌우, 그 밖=지정 안 함
+    head = struct.pack("<HHIIHHH", 0xFFFE, channels, samplerate, samplerate * channels * 4, channels * 4, 32, 22)
+    return head + struct.pack("<HI", 32, mask) + uuid.UUID(IEEE_FLOAT_GUID).bytes_le
+
+
+def parse_wave_format(raw: bytes) -> dict:
+    """WAVEFORMATEX(18바이트) 또는 WAVEFORMATEXTENSIBLE(40바이트) 바이트 → 사전."""
+    import struct
+    import uuid
+
+    tag, ch, sr, avg, align, bits, cb = struct.unpack("<HHIIHHH", raw[:18])
+    d = {"tag": hex(tag), "channels": ch, "rate": sr, "bits": bits, "block_align": align, "cbSize": cb}
+    if cb >= 22 and len(raw) >= 40:
+        valid, mask = struct.unpack("<HI", raw[18:24])
+        d.update(valid_bits=valid, channel_mask=hex(mask), subformat=str(uuid.UUID(bytes_le=raw[24:40])))
+    return d
+
+
 class _SoundcardSource:
     """soundcard 의 recorder 를 감싼 조각 읽기. 만든 스레드에서만 읽고 닫아야 합니다."""
 
-    # 16kHz 를 먼저 요청하고(WASAPI 자동 변환), 안 되면 장치 기본값 쪽으로 물러납니다.
-    RATES = (16000, 48000, 44100)
+    COMBOS = OPEN_COMBOS
 
-    def __init__(self, mic_obj):
+    def __init__(self, mic_obj, mf=None):
         self.device_id = getattr(mic_obj, "id", None)
         try:
             self.device_name = str(mic_obj.name)  # 진단용(오류 내용 복사)
         except Exception:
             self.device_name = None
+        self._mic = mic_obj
+        self._mf = mf  # soundcard.mediafoundation(윈도우). 없으면 'direct' 방법은 건너뜀
+        self.attempts: list[dict] = []
+        self._mix: dict | None = None
         last_err = None
-        for sr in self.RATES:
+        for combo in self.COMBOS:
             try:
-                # blocksize 는 WASAPI 버퍼 길이(0.5초). 읽기는 0.1초씩 합니다.
-                rec = mic_obj.recorder(samplerate=sr, channels=1, blocksize=int(sr * WASAPI_BUFFER_SECONDS))
+                rec, sr = self._open(combo)
                 rec.__enter__()
-            except Exception as e:  # 장치가 이 주파수를 거부
+            except Exception as e:
+                info = describe_exception(e)
+                info["combo"] = combo.label()
+                self.attempts.append(info)
                 last_err = e
                 continue
             self.started_at = time.monotonic()  # Start() 직후
             self._rec = rec
-            self.samplerate = sr
-            self._block = int(sr * BLOCK_SECONDS)
+            self.samplerate = int(sr)
+            self.combo = combo.label()
+            self._block = int(self.samplerate * BLOCK_SECONDS)
             return
-        raise RuntimeError(f"장치를 열 수 없습니다: {last_err}")
+        err = DeviceOpenError(self.device_name, self.attempts, self.device_info())
+        raise err from last_err
+
+    # ------------------------------------------------------------ 여는 방법
+    def _mix_format(self) -> dict:
+        """장치 믹스 형식(공유 모드). 한 번만 읽습니다."""
+        if self._mix is None:
+            self._mix = read_mix_format(self._mic, self._mf) if self._mf is not None else {}
+        return self._mix
+
+    def _open(self, combo: OpenCombo):
+        if combo.method == "soundcard":
+            sr = combo.samplerate or self._mix_format().get("rate") or 48000
+            block = int(sr * combo.buffer_s) if combo.buffer_s else None
+            return self._mic.recorder(samplerate=sr, channels=combo.channels, blocksize=block), sr
+        if combo.method == "direct":
+            if self._mf is None:
+                raise NotImplementedError("direct 열기는 윈도우(soundcard.mediafoundation)에서만")
+            mix = self._mix_format()
+            sr = combo.samplerate or mix.get("rate") or 48000
+            ch = combo.channels or mix.get("channels") or 1
+            return make_direct_recorder(self._mic, self._mf, sr, ch, combo.buffer_s or WASAPI_BUFFER_SECONDS), sr
+        raise ValueError(combo.method)
+
+    def device_info(self) -> dict:
+        """진단용 장치 속성(얻을 수 있는 것만, 실패는 실패 내용으로)."""
+        info: dict = {"이름": self.device_name, "루프백": bool(getattr(self._mic, "isloopback", False))}
+        try:
+            info["채널(soundcard)"] = self._mic.channels
+        except Exception as e:
+            d = describe_exception(e)
+            info["채널(soundcard)"] = f"확인 실패 {d['type']} {d['where']}"
+        try:
+            mix = self._mix_format()
+            if mix:
+                info["믹스 형식"] = mix
+        except Exception as e:
+            d = describe_exception(e)
+            info["믹스 형식"] = f"확인 실패 {d['type']} {d['repr']} {d['hresult'] or ''}"
+        return info
 
     def read(self) -> np.ndarray:
         data = self._rec.record(numframes=self._block)
         data = np.asarray(data, dtype=np.float32)
         if data.ndim == 2:
-            data = data.mean(axis=1)
+            data = data.mean(axis=1)  # 여러 채널로 열렸으면 모노로 합침
         return data
 
     def close(self) -> None:
@@ -152,6 +296,49 @@ class _SoundcardSource:
             self._rec.__exit__(None, None, None)
         except Exception:
             pass
+
+
+def read_mix_format(mic_obj, mf) -> dict:
+    """IAudioClient::GetMixFormat 의 실제 바이트를 표준 배치로 읽습니다(윈도우)."""
+    ptr = mic_obj._audio_client()
+    try:
+        pp = mf._ffi.new("WAVEFORMATEXTENSIBLE**")
+        hr = ptr[0][0].lpVtbl.GetMixFormat(ptr[0], pp)
+        mf._com.check_error(hr)
+        try:
+            raw = bytes(mf._ffi.buffer(pp[0], 18))
+            cb = int.from_bytes(raw[16:18], "little")
+            if cb >= 22:
+                raw = bytes(mf._ffi.buffer(pp[0], 40))
+            return parse_wave_format(raw)
+        finally:
+            mf._ole32.CoTaskMemFree(pp[0])
+    finally:
+        mf._com.release(ptr)
+
+
+def make_direct_recorder(mic_obj, mf, samplerate: int, channels: int, buffer_s: float):
+    """soundcard 의 _Recorder 를 쓰되, 초기화는 표준 배치 float 형식으로 직접 합니다(믹스 형식 assert 를 피함)."""
+    ptr = mic_obj._audio_client()
+    try:
+        rec = mf._Recorder.__new__(mf._Recorder)
+        rec._ptr = ptr
+        rec.channelmap = list(range(channels))
+        fmt = mf._ffi.new("char[]", pack_float_format(samplerate, channels))
+        #            resample   | remix      | better-SRC | nopersist   (soundcard 와 같은 플래그)
+        flags = 0x00100000 | 0x80000000 | 0x08000000 | 0x00080000
+        if getattr(mic_obj, "isloopback", False):
+            flags |= 0x00020000
+        hr = ptr[0][0].lpVtbl.Initialize(ptr[0], 0, flags, int(buffer_s * 10_000_000), 0,
+                                         mf._ffi.cast("WAVEFORMATEXTENSIBLE*", fmt), mf._ffi.NULL)
+        mf._com.check_error(hr)
+        rec._fmt_keepalive = fmt
+        rec.samplerate = samplerate
+        rec._idle_start_time = None
+        return rec
+    except BaseException:
+        mf._com.release(ptr)
+        raise
 
 
 _IMPORT_LOCK = threading.Lock()
@@ -242,15 +429,18 @@ class SoundcardBackend:
     def list_speakers(self) -> list[DeviceInfo]:
         return _run_in_mta(self._list_spks)
 
+    def _mf(self):
+        return sys.modules.get("soundcard.mediafoundation")
+
     def _open_mic(self, device_id: str | None) -> Source:
         mic = self._sc.default_microphone() if not device_id else self._sc.get_microphone(device_id)
-        return _SoundcardSource(mic)
+        return _SoundcardSource(mic, self._mf())
 
     def _open_loop(self, speaker_id: str | None) -> Source:
         if not speaker_id:
             speaker_id = self._sc.default_speaker().id
         lb = self._sc.get_microphone(speaker_id, include_loopback=True)
-        return _SoundcardSource(lb)
+        return _SoundcardSource(lb, self._mf())
 
     # 아래 넷은 녹음 스레드(COM 초기화됨)에서 직접 부릅니다.
     def open_microphone(self, device_id: str | None) -> Source:
@@ -264,6 +454,52 @@ class SoundcardBackend:
 
     def default_speaker_id(self) -> str | None:
         return self._sc.default_speaker().id
+
+
+def check_device(backend, kind: str, device_id: str | None, seconds: float = 1.0) -> dict:
+    """녹음하지 않고 장치를 열어 seconds 동안 읽어 봅니다([장치 점검], 자체 시험용).
+
+    녹음 스레드와 같은 규칙(F1): COM 을 초기화한 새 스레드에서 열고·읽고·닫습니다.
+    결과: ok, 장치 이름, 열린 방법(combo), 주파수, 소리 크기(dBFS, 가장 큰 0.1초), 앞서 실패한 방법들,
+    실패면 error·attempts·device_info.
+    """
+    def work():
+        src = backend.open_microphone(device_id) if kind == "mic" else backend.open_loopback(device_id)
+        try:
+            peak, frames = -90.0, 0
+            t = time.monotonic()
+            while time.monotonic() - t < seconds:
+                b = src.read()
+                if b.size:
+                    frames += len(b)
+                    rms = float(np.sqrt(np.mean(np.square(b, dtype=np.float64))))
+                    peak = max(peak, 20.0 * np.log10(rms + 1e-9))
+            return {"ok": True, "kind": kind, "device": getattr(src, "device_name", None) or getattr(src, "device_id", None),
+                    "combo": getattr(src, "combo", "?"), "samplerate": int(src.samplerate),
+                    "frames": frames, "level_db": round(max(-90.0, peak), 1),
+                    "failed_before": list(getattr(src, "attempts", []))}
+        finally:
+            src.close()
+
+    try:
+        return _run_in_mta(work, timeout=seconds + 30)
+    except DeviceOpenError as e:
+        return {"ok": False, "kind": kind, "device": e.device, "error": str(e), "attempts": e.attempts,
+                "device_info": e.device_info}
+    except Exception as e:
+        d = describe_exception(e)
+        return {"ok": False, "kind": kind, "device": device_id, "error": f"{d['type']}: {d['repr']}", "attempts": [d]}
+
+
+def check_text(r: dict) -> str:
+    """점검 결과 한 덩어리 글(화면·오류 복사용)."""
+    who = "내 마이크" if r.get("kind") == "mic" else "상대방 소리(스피커)"
+    if r.get("ok"):
+        lv = r["level_db"]
+        hint = "소리 들어옴" if lv > -55 else "조용함(말하거나 소리를 틀고 다시 점검해 보십시오)"
+        extra = f" · 앞서 실패한 방법 {len(r['failed_before'])}개" if r.get("failed_before") else ""
+        return f"{who}: 열림 — {r['device']} · 방법 {r['combo']} · {lv} dBFS({hint}){extra}"
+    return f"{who}: 열지 못함\n{r.get('error', '')}"
 
 
 # ---------------------------------------------------------------- 시험용 장치
@@ -300,6 +536,7 @@ class FakeSource:
         self._closed = threading.Event()
         self._cancel = threading.Event()
         self.reader_threads: set[int] = set()
+        self.combo = "fake"
 
     def _in_gap(self, t: float) -> bool:
         return any(a <= t < b for a, b in self._gaps)

@@ -78,6 +78,7 @@ class AlignedTrack:
         self.default_probe = default_probe  # None 이면 고른 장치에 고정
         self.source: Source | None = None
         self.device_name: str | None = None
+        self.open_combo: str | None = None
         self._source_closed = True
         self.sr: int | None = samplerate
         self.started_at: float | None = None  # 처음 스트림 시작 시각
@@ -169,6 +170,7 @@ class AlignedTrack:
         self._rs = None if int(src.samplerate) == self.sr else Resampler(int(src.samplerate), self.sr)
         self.opened_id = getattr(src, "device_id", None)
         self.device_name = getattr(src, "device_name", None) or self.opened_id
+        self.open_combo = getattr(src, "combo", None)  # 어떤 방법으로 열렸는지(진단, R5)
         if self.started_at is None:
             self.started_at = started
         self._q.put(("sync", started))
@@ -417,6 +419,10 @@ class Recorder:
     def device_names(self) -> dict[str, str | None]:
         """실제로 열린 장치 이름(진단용)."""
         return {k: t.device_name for k, t in self.tracks.items()}
+
+    def device_combos(self) -> dict[str, str | None]:
+        """장치를 연 방법(진단용, R5)."""
+        return {k: t.open_combo for k, t in self.tracks.items()}
 
     def problems(self) -> dict[str, str]:
         """지금 화면에 경고로 띄울 문제."""
