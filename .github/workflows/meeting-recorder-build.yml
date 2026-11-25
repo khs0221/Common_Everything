@@ -61,7 +61,16 @@ jobs:
           key: mrec-models-${{ hashFiles('meeting-recorder/mrec/models.py') }}
 
       - name: 모델 받기(해시 확인)
-        run: python tools/download_models.py
+        # 단계 전체 시간 제한 + 실패 시 두 번 더(이미 받은 파일은 해시가 맞으면 건너뜀). 파일마다 멈춤 감시·재시도는 스크립트 안에서.
+        timeout-minutes: 30
+        run: |
+          for ($i = 1; $i -le 3; $i++) {
+            python -u tools/download_models.py
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "::warning::모델 받기 실패($i/3), 30초 뒤 다시"
+            Start-Sleep -Seconds 30
+          }
+          exit 1
 
       - name: 시험(pytest)
         run: python -m pytest -q
