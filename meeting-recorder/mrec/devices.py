@@ -143,6 +143,10 @@ OPEN_COMBOS = (
 )
 
 
+# R4 까지 쓰던 세 방법. 믹스 형식을 읽지 않고 그대로 먼저 시도합니다(감사 R6 M1: 열리던 장치는 똑같이).
+LEGACY_COMBOS = OPEN_COMBOS[:3]
+
+
 class DeviceOpenError(RuntimeError):
     """모든 열기 조합이 실패. attempts(조합별 실패)와 device_info(장치 속성)를 담습니다."""
 
@@ -235,14 +239,17 @@ class _SoundcardSource:
         if last in combos:  # 다시 연결할 때는 마지막으로 열린 방법부터(감사 R5 N1)
             combos.remove(last)
             combos.insert(0, last)
-        skip_sc = self._mix_not_extensible()
+        skip_sc = None  # 믹스 형식 판단은 R4 까지의 세 방법이 모두 실패한 뒤에만(감사 R6 M1)
         for combo in combos:
-            if skip_sc and combo.method == "soundcard":
-                # 믹스 형식이 확장 형식이 아니면 soundcard 의 516·517줄 assert 로 실패하고, 그때 만든 COM 객체를
-                # 돌려받을 수 없어 새므로(감사 R5 N1) 시도하지 않습니다. 열리던 장치는 확장 형식이라 해당 없음.
-                self.attempts.append({"combo": combo.label(), "type": "건너뜀", "repr": f"믹스 형식 {skip_sc}",
-                                      "hresult": None, "where": ""})
-                continue
+            if combo.method == "soundcard" and combo not in LEGACY_COMBOS:
+                if skip_sc is None:
+                    skip_sc = self._mix_not_extensible()  # 읽기 실패는 '' → 막지 않음
+                if skip_sc:
+                    # 믹스 형식이 확장 형식이 아니면 soundcard 의 516·517줄 assert 로 실패하고, 그때 만든 COM 객체를
+                    # 돌려받을 수 없어 새므로(감사 R5 N1) R4 이후 덧붙인 soundcard 방법은 시도하지 않습니다.
+                    self.attempts.append({"combo": combo.label(), "type": "건너뜀", "repr": f"믹스 형식 {skip_sc}",
+                                          "hresult": None, "where": ""})
+                    continue
             rec = None
             try:
                 rec, sr = self._open(combo)
