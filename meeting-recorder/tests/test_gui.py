@@ -185,3 +185,36 @@ def test_gui_saved_device_and_auto_selection(tmp_path, monkeypatch, tk_window):
     app.mic_cb.current(1)  # '(현재 기본) 기본 마이크' 를 직접 고름 → 그 장치로 고정
     assert app.mic_cb.get().startswith("(현재 기본)")
     assert app._selected(app.mic_cb, app.mics) == "m-default"
+
+
+def test_gui_device_check_button(tmp_path, monkeypatch, tk_window):
+    """[장치 점검]: 열리면 결과 안내, 못 열면 조합별 진단을 오류 칸과 복사 내용에 보여 줍니다(R5)."""
+    from tkinter import messagebox
+
+    from mrec import gui
+    from mrec.devices import DeviceOpenError, FakeBackend
+
+    shown = {}
+    monkeypatch.setattr(messagebox, "showinfo", lambda t, m, **k: shown.setdefault("info", m))
+    monkeypatch.setattr(messagebox, "showwarning", lambda t, m, **k: shown.setdefault("warn", m))
+
+    class Bad(FakeBackend):
+        def open_microphone(self, device_id):
+            raise DeviceOpenError("USB 헤드셋 마이크", [{"combo": "soundcard/16000Hz/1ch/버퍼0.5s", "type": "AssertionError",
+                                                     "repr": "AssertionError()", "hresult": None,
+                                                     "where": "mediafoundation.py:516 __init__"}], {"채널": 1})
+
+    for backend, ok in ((FakeBackend(), True), (Bad(), False)):
+        shown.clear()
+        app = _app(tk_window, tmp_path, monkeypatch, lambda b=backend: b)
+        app.check_devices()
+        t = time.monotonic()
+        while time.monotonic() - t < 10 and not shown:
+            tk_window.update()
+            time.sleep(0.05)
+        if ok:
+            assert "내 마이크: 열림" in shown["info"] and "방법 fake" in shown["info"]
+        else:
+            assert "열지 못함" in shown["warn"] and "mediafoundation.py:516" in app._err_report
+            assert app.copy_btn.winfo_ismapped()
+        assert str(app.check_btn["state"]) == "normal"

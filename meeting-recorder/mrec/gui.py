@@ -16,7 +16,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from . import merge, models, output, paths, pipeline, sysinfo
-from .devices import DeviceInfo, default_backend
+from .devices import DeviceInfo, check_device, check_text, default_backend
 from .recorder import LOOP_FILE, MIC_FILE, Recorder, new_meeting_folder
 
 log = logging.getLogger("mrec")
@@ -121,7 +121,9 @@ class App:
         self.spk_cb.current(0)
         ttk.Button(f, text="장치 새로고침", command=self.refresh_devices).grid(row=0, column=2, rowspan=2, padx=6)
         ttk.Label(f, text="보통은 '자동' 그대로 두십시오. 특정 장치로 고정하고 싶을 때만 고릅니다.",
-                  foreground="#555").grid(row=2, column=0, columnspan=3, sticky="w", padx=6)
+                  foreground="#555").grid(row=2, column=0, columnspan=2, sticky="w", padx=6)
+        self.check_btn = ttk.Button(f, text="장치 점검", command=self.check_devices)
+        self.check_btn.grid(row=2, column=2, padx=6, pady=2)
         # 장치 계층·목록 문제를 숨기지 않고 보여 주는 칸(문제 있을 때만 보임)
         self.dev_err = tk.StringVar(value="")
         self.dev_err_label = tk.Label(f, textvariable=self.dev_err, fg="#b71c1c", wraplength=430,
@@ -278,6 +280,40 @@ class App:
             return None
         return devs[i - 1].id
 
+    def check_devices(self):
+        """[장치 점검]: 녹음하지 않고 고른 마이크·스피커를 1초씩 열어 소리 크기와 연 방법을 보여 줍니다."""
+        if self.recorder and self.recorder.running:
+            messagebox.showinfo("장치 점검", "녹음 중에는 점검할 수 없습니다. 녹음 막대를 보십시오.")
+            return
+        if self.backend is None and not self._init_backend():
+            return
+        mic_id = self._selected(self.mic_cb, self.mics)
+        spk_id = self._selected(self.spk_cb, self.spks)
+        self.check_btn.configure(state="disabled")
+        self.status.set("장치 점검 중… (2~3초, 말하거나 소리를 틀어 두면 크기가 보입니다)")
+        backend = self.backend
+
+        def work():
+            res = [check_device(backend, "mic", mic_id, 1.0), check_device(backend, "loop", spk_id, 1.0)]
+            self.q.put(("check", res))
+
+        threading.Thread(target=work, name="device-check", daemon=True).start()
+
+    def _check_done(self, res: list[dict]):
+        self.check_btn.configure(state="normal")
+        text = "\n\n".join(check_text(r) for r in res)
+        log.info("장치 점검: %s", [{k: r.get(k) for k in ("kind", "ok", "device", "combo", "samplerate", "level_db")}
+                                for r in res])
+        if all(r["ok"] for r in res):
+            self.status.set("장치 점검: 두 장치 모두 열렸습니다.")
+            self.last_devices = {("mic" if r["kind"] == "mic" else "loop"): r["device"] for r in res}
+            messagebox.showinfo("장치 점검", text)
+        else:
+            self.status.set("장치 점검: 열지 못한 장치가 있습니다. [오류 내용 복사]로 내용을 보낼 수 있습니다.")
+            self._show_device_error("장치 점검: 열지 못한 장치가 있습니다. '자동'으로 바꾸거나 다른 장치를 골라 보시고, "
+                                    "계속되면 [오류 내용 복사]를 눌러 담당자에게 보내 주십시오.", "장치 점검", text)
+            messagebox.showwarning("장치 점검", text[:1500])
+
     def _show_device_error(self, msg: str, where: str, err_text: str):
         self.dev_err.set(msg)
         self._err_report = error_report(where, err_text, self.last_devices)
@@ -300,7 +336,11 @@ class App:
     def _check_models(self):
         missing = models.missing_models()
         if missing:
-            self.status.set("모델 파일이 없습니다. 압축을 다시 풀어 주십시오(models 폴더 필요).")
+            usable = [name for name, _, m in QUALITY_CHOICES if not models.missing_for(m)]
+            if usable:
+                self.status.set(f"일부 모델 파일이 없습니다. 지금은 처리 품질 '{usable[0]}' 만 쓸 수 있습니다.")
+            else:
+                self.status.set("모델 파일이 없습니다. 압축을 다시 풀어 주십시오(models 폴더 필요).")
             log.error("모델 없음: %s", missing)
         elif not paths.path_is_safe_for_native(paths.models_dir()):
             messagebox.showwarning(
@@ -346,7 +386,8 @@ class App:
             w.configure(state="disabled")
         sr = {k: t.sr for k, t in self.recorder.tracks.items()}
         self.last_devices = self.recorder.device_names()
-        log.info("녹음 시작: 표본 주파수 %s, 장치 %s, %s", sr, self.last_devices, sysinfo.system_summary())
+        log.info("녹음 시작: 표본 주파수 %s, 장치 %s, 연 방법 %s, %s", sr, self.last_devices,
+                 self.recorder.device_combos(), sysinfo.system_summary())
         self.status.set(f"녹음 중… 저장 위치: {folder}")
 
     def stop_recording(self):
@@ -464,10 +505,14 @@ class App:
         open_folder(d)
 
     def _start_job(self, job: pipeline.Job):
-        if models.missing_models():
-            messagebox.showerror("모델 없음", "모델 파일이 없어 글로 옮길 수 없습니다.\n압축을 다시 풀어 주십시오.")
-            return
         quality, model = self._quality()
+        miss = models.missing_for(model, self._lang() is None)
+        if miss:
+            log.error("모델 없음(%s): %s", model, miss)
+            other = "빠름" if model != "small" else "정확"
+            messagebox.showerror("모델 없음", "이 처리 품질에 필요한 모델 파일이 없어 글로 옮길 수 없습니다.\n"
+                                 f"처리 품질을 '{other}'으로 바꾸거나, 압축을 다시 풀어 주십시오.")
+            return
         job.model = model  # 다시 처리할 때도 지금 고른 품질을 씀
         job.mark_low_conf = bool(self.settings.get("mark_low_conf", pipeline.MARK_LOW_CONF_DEFAULT))
         self._update_glossary_note()  # 사용자가 용어 파일을 고쳤을 수 있음
@@ -518,6 +563,8 @@ class App:
                     self.prog_var.set(f"{name} {frac * 100:.0f}%{eta}")
                 elif msg[0] == "done":
                     self._job_done(msg[1], msg[2])
+                elif msg[0] == "check":
+                    self._check_done(msg[1])
         except queue.Empty:
             pass
 

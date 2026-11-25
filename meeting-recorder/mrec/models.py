@@ -80,6 +80,27 @@ def missing_models(root: Path | None = None) -> list[str]:
     return [f.rel for f in FILES if not (root / f.rel).is_file() or (root / f.rel).stat().st_size == 0]
 
 
+def missing_for(model: str, auto_language: bool = True, root: Path | None = None) -> list[str]:
+    """이 처리에 필요한 파일 중 없는 것(감사 R4 E2: 한 모델만 없어도 다른 품질은 쓸 수 있게).
+
+    필요한 것: whisper 가 아닌 모델(화자 분리·VAD) + 고른 whisper 모델 + 언어 자동이면 판별용 small.
+    """
+    root = root or models_dir()
+    need_dirs = {WHISPER_DIRS[model]}
+    if auto_language:
+        need_dirs.add(WHISPER_DIRS["small"])
+    all_dirs = set(WHISPER_DIRS.values())
+    out = []
+    for f in FILES:
+        top = f.rel.split("/")[0]
+        if top in all_dirs and top not in need_dirs:
+            continue
+        p = root / f.rel
+        if not p.is_file() or p.stat().st_size == 0:
+            out.append(f.rel)
+    return out
+
+
 def verify_models(root: Path | None = None) -> list[str]:
     """해시가 다른 파일 목록(느림: 전체를 읽음)."""
     root = root or models_dir()

@@ -42,21 +42,40 @@ _DESC = re.compile(r"\t|\s[-–—]\s|\s?:\s|：")  # '용어 - 설명', '용어
 _QUOTES = "\"'“”‘’`「」『』"
 
 
+class Unreadable(Exception):
+    """파일은 있는데 문자 인코딩을 알 수 없음."""
+
+
 def _decode(path: Path) -> str | None:
+    """None = 파일 없음. 읽을 수 없는 인코딩이면 Unreadable."""
     try:
         raw = path.read_bytes()
     except OSError:
         return None
+    # UTF-16(메모장 '유니코드' 저장 등, 감사 R4 E1): BOM 이 있거나, BOM 없이 바이트 절반이 0 인 경우
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    elif len(raw) >= 4 and raw.count(b"\x00") >= len(raw) // 3:
+        # 영문·숫자는 한쪽 바이트가 0: 홀수 자리에 0 이 많으면 리틀 엔디언, 짝수 자리면 빅 엔디언
+        odd, even = raw[1::2].count(0), raw[0::2].count(0)
+        try:
+            return raw.decode("utf-16-le" if odd >= even else "utf-16-be")
+        except UnicodeDecodeError:
+            pass
     try:
         return raw.decode("utf-8-sig")
     except UnicodeDecodeError:
-        try:  # 메모장(ANSI) 등 CP949 저장 대비
-            text = raw.decode("cp949")
-            log.warning("용어 파일이 UTF-8 이 아니어서 CP949 로 읽음: %s", path.name)
-            return text
-        except UnicodeDecodeError:
-            log.warning("용어 파일을 읽을 수 없음(문자 인코딩): %s", path.name)
-            return None
+        pass
+    try:  # 메모장(ANSI) 등 CP949 저장 대비
+        text = raw.decode("cp949")
+        log.warning("용어 파일이 UTF-8 이 아니어서 CP949 로 읽음: %s", path.name)
+        return text
+    except UnicodeDecodeError:
+        log.warning("용어 파일을 읽을 수 없음(문자 인코딩): %s", path.name)
+        raise Unreadable(path.name)
 
 
 def read_terms_stats(path: Path) -> tuple[list[str], dict]:
@@ -68,8 +87,12 @@ def read_terms_stats(path: Path) -> tuple[list[str], dict]:
     - '#' 줄은 주석, 빈 줄 허용. UTF-8(BOM 포함)·CP949 를 읽음.
     - 대소문자 무시 중복 제거(처음 표기 유지). MAX_TERM_CHARS 자를 넘는 항목은 건너뛰고 셈.
     """
-    stats = {"terms": 0, "skipped_long": 0, "duplicates": 0}
-    text = _decode(path)
+    stats = {"terms": 0, "skipped_long": 0, "duplicates": 0, "unreadable": False}
+    try:
+        text = _decode(path)
+    except Unreadable:
+        stats["unreadable"] = True
+        return [], stats
     if text is None:
         return [], stats
     seen, out = set(), []
@@ -154,9 +177,15 @@ def load_full(directory: Path | None = None) -> list[str]:
 
 def status_text(directory: Path | None = None) -> str:
     """화면에 보여 줄 한 줄 안내."""
+    d = directory or glossary_dir()
     h = load_hints(directory)
-    full, fst = read_terms_stats((directory or glossary_dir()) / FULL_FILE)
+    _, hst = read_terms_stats(d / HINT_FILE)
+    full, fst = read_terms_stats(d / FULL_FILE)
     parts = []
+    if hst["unreadable"]:
+        parts.append(f"{HINT_FILE} 읽지 못함(메모장에서 'UTF-8'로 다시 저장해 주십시오)")
+    if fst["unreadable"]:
+        parts.append(f"{FULL_FILE} 읽지 못함(메모장에서 'UTF-8'로 다시 저장해 주십시오)")
     if h:
         s = f"힌트 파일 {h['read']}개 읽음 중 {h['used']}개 사용"
         if h["dropped"]:
