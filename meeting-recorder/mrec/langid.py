@@ -30,7 +30,10 @@ LANGS = ("en", "ko")
 WIN_S = 3.0          # 판별 창 길이
 HOP_S = 1.5          # 창 간격
 SINGLE_MAX_S = 4.0   # 이보다 짧은 구간은 창 하나로 판별
-CONF = 0.6           # 확실 판정 기준(영어·한국어 중 큰 확률)
+CONF = 0.6           # 확실 판정 기준(영어·한국어 중 큰 확률). 판별 모델별 값은 CONF_BY_MODEL
+# R6 에서 base 0.7 을 시험했으나 수정 1회차 측정(1~2초 짧은 발언)에서 base 는 영어를 한국어로 판별하는
+# 경우가 있어(0.7~0.9 모두 1초·1.5초 각 1건) 판별 모델은 small 로 되돌림. base 값은 비교용으로만 남김.
+CONF_BY_MODEL = {"small": 0.6, "base": 0.7}
 MIN_PIECE_S = 0.6    # 나눈 조각의 최소 길이
 
 
@@ -76,9 +79,9 @@ def _windows(start: float, end: float) -> list[tuple[float, float]]:
     return out
 
 
-def _label(p_en: float, p_ko: float) -> tuple[str | None, bool]:
+def _label(p_en: float, p_ko: float, conf: float | None = None) -> tuple[str | None, bool]:
     best = "en" if p_en >= p_ko else "ko"
-    return (best, True) if max(p_en, p_ko) >= CONF else (None, False)
+    return (best, True) if max(p_en, p_ko) >= (CONF if conf is None else conf) else (None, False)
 
 
 def _quietest(audio: np.ndarray, seg_start: float, a: float, b: float) -> float:
@@ -94,14 +97,14 @@ def _quietest(audio: np.ndarray, seg_start: float, a: float, b: float) -> float:
 
 
 def split_segment(audio: np.ndarray, seg_start: float, seg_end: float,
-                  probe: Callable[[np.ndarray], tuple[float, float]]) -> list[LangPiece]:
+                  probe: Callable[[np.ndarray], tuple[float, float]], conf: float | None = None) -> list[LangPiece]:
     """한 말소리 구간을 언어가 같은 조각들로 나눕니다(확실한 언어 전환이 있을 때만 나눔)."""
     wins = _windows(seg_start, seg_end)
     labs = []
     for a, b in wins:
         x = audio[int((a - seg_start) * TARGET_SR):int((b - seg_start) * TARGET_SR)]
         pe, pk = probe(x)
-        lab, sure = _label(pe, pk)
+        lab, sure = _label(pe, pk, conf)
         labs.append((a, b, lab, pe, pk))
     sure_labs = [(a, b, lab) for a, b, lab, _, _ in labs if lab]
     if not sure_labs:

@@ -1,0 +1,6 @@
+# 빌드 때 turbo int8 저장본을 만드는 변환 도구(프로그램에는 들어가지 않음). 판을 바꾸면 결과 해시가 달라질 수 있음.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.15.0+cpu
+transformers==5.24.1
+ctranslate2==4.9.1
+numpy==2.5.5

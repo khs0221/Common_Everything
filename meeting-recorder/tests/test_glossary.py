@@ -155,6 +155,24 @@ def test_missing_for_allows_other_quality(tmp_path):
             p = tmp_path / f.rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(b"x")
-    assert models.missing_for("small", True, tmp_path) == []           # 빠름은 쓸 수 있음
-    assert models.missing_for("turbo", True, tmp_path)                 # 정확은 막힘
+    assert models.missing_for("small", False, tmp_path) == []           # 판별 모델은 있음
+    assert models.missing_for("turbo", True, tmp_path)                 # 옮기기 모델이 없으면 막힘
     assert all(m.startswith(models.WHISPER_TURBO_DIR) for m in models.missing_for("turbo", True, tmp_path))
+
+
+def test_hint_echo_catches_list_without_commas_and_short_insertions():
+    """R6(감사 R4 N1): 쉼표 없는 용어 나열과 1~2단어 끼어듦."""
+    from types import SimpleNamespace
+
+    from mrec.transcribe import Transcriber
+
+    t = Transcriber.__new__(Transcriber)
+    t.hotwords = "Cpk, Ppk, Cp, Pp, Gage R&R, MSA, SPC, FMEA, DFMEA"
+    t.hint_vocab_text = None
+    assert t.hint_echo("Cpk Ppk Cp Pp MSA")                      # 쉼표 없는 나열
+    assert not t.hint_echo("We checked the Cpk and Ppk values today")  # 실제 문장
+    seg = lambda text, nsp, lp: SimpleNamespace(text=text, no_speech_prob=nsp, avg_logprob=lp)  # noqa: E731
+    assert t.short_hint_only(seg(" Cpk.", 0.6, -0.5))             # 말소리일 가능성 낮은 1단어
+    assert t.short_hint_only(seg(" MSA SPC", 0.1, -1.2))          # 확신 낮은 2단어
+    assert not t.short_hint_only(seg(" Cpk.", 0.05, -0.2))        # 또렷하게 말한 용어
+    assert not t.short_hint_only(seg(" Thank you.", 0.9, -1.5))   # 용어가 아님(힌트와 무관)

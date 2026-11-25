@@ -53,15 +53,52 @@ class Segment:
     words: list[Word] = field(default_factory=list)
 
 
+HALLUCINATION_GUARD = True  # 기본값. 설정 파일(settings.json)의 "tail_text_guard": false 로 끌 수 있음(pipeline.Job.guard)
+# '불확실' 조각에서 글이 안 나오면 그 조각만 언어를 다시 보고 옮김(R6 수정 2회차). 윈도우 CI 에서 짧은 말·작은
+# 목소리 트랙의 영어 1개가 한글로 적힌 실행이 있었고(리눅스 재현 안 됨) 원인에서 배제할 수 없어 기본 끔(되돌림).
+# 설정 "recheck_unsure": true 로만 켜집니다(pipeline.Job.recheck_unsure → Transcriber.recheck).
+RECHECK_UNSURE = False
+TAIL_S = 1.0     # 첫 창이 아닌 30초 창에 남은 소리가 이보다 짧을 때만 검사
+MAX_RATE = 20.0  # 초당 말 단위(한글 음절, 영어 낱말) 상한. 빠른 말도 한국어 약 9음절/초, 영어 약 5낱말/초
+FRAME_S = 0.01   # faster-whisper 의 seek 단위(멜 프레임 10ms)
+_UNIT = re.compile(r"[가-힣]|[A-Za-z0-9']+")
+
+
+class HallucinationGuard:
+    """소리가 거의 없는 30초 창에서 나온, 말할 수 없는 속도의 글 거르기(R6 수정 1회차, 수정 2회차에 좁힘).
+
+    whisper 는 묶음을 30초 창으로 나눠 옮깁니다. 앞 창이 묶음 끝 가까이에서 끝나면 마지막 창에는 말소리 구간
+    끝의 여유(0.2~0.4초)와 무음 채움만 남고, 거기서 말하지 않은 "감사합니다." 가 0.04~0.06초 길이로
+    나왔습니다(turbo 는 무음 확률이 늘 0 이라 whisper 기본 거르기가 듣지 않음). 그래서 세 조건이 모두 맞을
+    때만 버립니다: 첫 창이 아님, 그 창에 남은 소리가 TAIL_S 초 미만, 초당 말 단위가 MAX_RATE 초과
+    (5음절을 0.06초에 말할 수는 없음). 소리 크기·낱말 확률로 거르던 규칙(수정 1회차)은 작은 목소리와 짧은
+    대답을 버려서(감사 R6 재감사 G1) 없앴습니다.
+    """
+
+    def __init__(self, audio):
+        self.dur = len(audio) / TARGET_SR
+
+    def reject(self, seg) -> bool:
+        win = float(getattr(seg, "seek", 0) or 0) * FRAME_S  # 이 글이 나온 30초 창의 시작(묶음 안 초)
+        if win <= 0 or self.dur - win >= TAIL_S:
+            return False
+        units = len(_UNIT.findall(seg.text))
+        return units > 0 and units / max(float(seg.end) - float(seg.start), 1e-3) > MAX_RATE
+
+
 class Transcriber:
     def __init__(self, model_dir: Path | None = None, threads: int | None = None, beam_size: int = 1,
-                 model: str = "small", hotwords: str | None = None, hint_langs: tuple[str, ...] = ("en",),
+                 model: str = "turbo", hotwords: str | None = None, hint_langs: tuple[str, ...] = ("en",),
                  hint_vocab_text: str | None = None):
-        """model: 'small'(빠름) 또는 'turbo'(정확, large-v3-turbo). hotwords: 인식 힌트 문자열(hint_langs 언어 묶음에만)."""
+        """model: 'turbo'(글로 옮기기) 또는 'small'(발언 단위 언어 판별 전용). hotwords: 인식 힌트 문자열(hint_langs 언어 묶음에만)."""
         _stub_optional_imports()
         from faster_whisper import WhisperModel
 
         self.model_name = model
+        self.guard = True  # 소리가 거의 없는 창의 글 거르기(pipeline.Job.guard)
+        self.recheck = RECHECK_UNSURE  # 불확실 조각 다시 보기(pipeline.Job.recheck_unsure)
+        self.dropped: list[tuple[float, str]] = []  # 거른 글 (원래 시각, 글). 글은 기록하지 않음
+        self._dropped_now: list[tuple[float, str]] = []
         self.prev_text = False  # condition_on_previous_text(측정 뒤 결정, R4 changes.md)
         self.hotwords = hotwords or None
         self.hint_vocab_text = hint_vocab_text  # 끼어듦 검사용 용어(문맥 문장 제외). 없으면 hotwords 전체
@@ -80,7 +117,7 @@ class Transcriber:
 
         단어가 3개 이상이고 절반 이상이 힌트 용어의 단어이면서 쉼표로 나열하거나(2개 이상) 반복되면
         (서로 다른 단어 비율 0.5 이하), 또는 같은 단어가 세 번 이상 연속되거나 6단어 이상에서 서로 다른
-        단어 비율이 0.3 이하이면 그렇다고 봅니다. 그렇다고 보면 그 묶음만 힌트 없이 다시 옮기므로(R3 와 같은
+        단어 비율이 0.3 이하이면, 또는 단어의 70% 이상이 힌트 용어의 단어이면(쉼표 없는 나열, R6) 그렇다고 봅니다. 그렇다고 보면 그 묶음만 힌트 없이 다시 옮기므로(R3 와 같은
         결과), 잘못 걸려도 결과가 나빠지지 않고 시간만 더 듭니다.
         """
         ws = re.findall(r"[a-z0-9][a-z0-9&.\-]*", text.lower())
@@ -88,6 +125,10 @@ class Transcriber:
         if len(ws) < 3:
             return False
         uniq = len(set(ws)) / len(ws)
+        vocab = self._hint_vocab()
+        # R6(감사 R4 N1): 쉼표 없이 용어만 늘어놓은 출력도 잡음(단어 70% 이상이 힌트 용어의 단어)
+        if sum(w in vocab for w in ws) / len(ws) >= 0.7:
+            return True
         if len(ws) >= 6 and uniq <= 0.3:
             return True
         run = best = 1
@@ -96,9 +137,21 @@ class Transcriber:
             best = max(best, run)
         if best >= 3:  # 같은 단어 세 번 연속
             return True
-        vocab = self._hint_vocab()
         inv = sum(w in vocab for w in ws) / len(ws)
         return inv >= 0.5 and (text.count(",") >= 2 or uniq <= 0.5)
+
+    def short_hint_only(self, seg) -> bool:
+        """1~2단어 끼어듦(R6, 감사 R4 N1): 구간 글 전체가 힌트 용어 한두 개뿐이고, whisper 가 말소리일
+        가능성을 낮게 본 구간(no_speech_prob > 0.3 또는 avg_logprob < -0.8). 진짜로 용어만 짧게 말한 것은
+        보통 이 확률이 좋아 걸리지 않고, 걸려도 힌트 없이 다시 옮길 뿐입니다."""
+        ws = [w.strip(".-,?!") for w in re.findall(r"[a-z0-9][a-z0-9&.\-]*", seg.text.lower())]
+        ws = [w for w in ws if w]
+        if not ws or len(ws) > 3:
+            return False
+        vocab = self._hint_vocab()
+        if not all(w in vocab for w in ws):
+            return False
+        return getattr(seg, "no_speech_prob", 0.0) > 0.3 or getattr(seg, "avg_logprob", 0.0) < -0.8
 
     def _hint_vocab(self) -> set:
         src = getattr(self, "hint_vocab_text", None) or self.hotwords or ""
@@ -126,17 +179,22 @@ class Transcriber:
             probs = dict(info.all_language_probs or [])
             lang = max(AUTO_LANGS, key=lambda k: probs.get(k, 0.0))
             segs, info = self._run(audio, lang, words)
-        if self._hints_active(lang) and any(self.hint_echo(s.text) for s in segs):
+        if self._hints_active(lang) and any(self.hint_echo(s.text) or self.short_hint_only(s) for s in segs):
             # 힌트 때문에 말하지 않은 용어가 끼어든 것으로 보이면 이 묶음은 힌트 없이 다시 옮깁니다.
             self.hint_retries = getattr(self, "hint_retries", 0) + 1
             segs, info = self._run(audio, lang, words, hints=False)
         out: list[Segment] = []
+        guard = HallucinationGuard(audio) if (HALLUCINATION_GUARD and getattr(self, "guard", True)) else None
+        self._dropped_now = []
         for s in segs:
             text = s.text.strip()
             if not text:
                 continue
             # 말이 없는데 지어낸 듯한 구간 거르기(whisper 기본 기준과 같음)
             if s.no_speech_prob > 0.6 and s.avg_logprob < -1.0:
+                continue
+            if guard is not None and guard.reject(s):
+                self._dropped_now.append((offset + float(s.start), text))  # 글은 메모리에만(시험용), 기록에는 시각만
                 continue
             ws = [Word(offset + w.start, offset + w.end, w.word, float(getattr(w, 'probability', 1.0)))
                   for w in (s.words or [])]
@@ -147,7 +205,7 @@ class Transcriber:
                         words: bool, progress: Callable[[float], None] | None = None,
                         cancel: Callable[[], bool] | None = None,
                         pack_seconds: float = PACK_SECONDS,
-                        runs: list | None = None) -> list[Segment]:
+                        runs: list | None = None, recheck: list | None = None) -> list[Segment]:
         """말소리 구간만 이어 붙여(무음 제거) 묶음 단위로 글로 옮긴 뒤, 원래 시각으로 되돌립니다.
 
         whisper 는 30초 창 단위로 계산하므로, 무음이 많은 트랙(내가 듣고만 있는 마이크 등)을
@@ -165,6 +223,7 @@ class Transcriber:
             self.last_lang_stats = {}
             runs = self.detect_language_runs(wav16k, speech, cancel=cancel,
                                              progress=(lambda f: progress(f * LID_SHARE)) if progress else None)
+            recheck = self.last_unsure
             base = LID_SHARE
         else:
             self.last_lang_stats = {}
@@ -182,11 +241,42 @@ class Transcriber:
                 if len(audio) >= TARGET_SR * 0.2:
                     for s in self.transcribe_window(audio, 0.0, lang, words):
                         out.extend(tmap.restore(s))
+                    self.dropped = getattr(self, "dropped", []) + [(tmap.to_orig(t), x) for t, x in self._dropped_now]
                 done += sum(b - a for a, b in pack)
                 if progress:
                     progress(base + (1 - base) * done / total)
+        if recheck and getattr(self, "recheck", RECHECK_UNSURE):
+            out.extend(self.recheck_unsure(wav16k, recheck, out, words, cancel))
         out.sort(key=lambda s: s.start)
         return out
+
+    def recheck_unsure(self, wav16k: Path, unsure: list, out: list, words: bool,
+                       cancel: Callable[[], bool] | None = None) -> list[Segment]:
+        """판별이 '불확실'이라 이웃 언어로 정한 조각 가운데 글이 거의 나오지 않은 것(낱말이 조각의 절반 미만)만, 그 조각 하나를 언어
+        자동으로 다시 봅니다(R6 수정 2회차). 영어 발언 사이의 1~1.5초 한국어가 영어 묶음에 들어가 글 없이
+        빠지던 경우입니다. 자동 판별 결과가 처음 정한 언어와 다를 때만 받아들입니다(같으면 처음 결과 그대로 둠:
+        한국어를 라틴 문자로, 영어를 한글로 적지 않기 위해).
+        """
+        added: list[Segment] = []
+        self.rechecked = getattr(self, "rechecked", 0)
+        for a, b, lang in unsure:
+            if cancel and cancel():
+                raise InterruptedError
+            covered = sum(max(0.0, min(w.end, b) - max(w.start, a)) for s in out for w in (s.words or [s]))
+            if covered >= 0.5 * (b - a):
+                continue  # 조각의 절반 이상이 낱말로 덮임(글이 나옴). 이웃 문장 첫 낱말이 걸친 정도는 다시 봄
+            audio = read_segment(wav16k, a, b)
+            if len(audio) < TARGET_SR * 0.2:
+                continue
+            self.rechecked += 1
+            # 먼저 언어만 봅니다(인코더 한 번). 처음 정한 언어와 같으면 다시 옮기지 않음(시간 절약)
+            _, _, probs = self.model.detect_language(audio=audio)
+            probs = dict(probs or [])
+            pick = max(AUTO_LANGS, key=lambda k: probs.get(k, 0.0))
+            if pick == lang:
+                continue
+            added.extend(self.transcribe_window(audio, a, pick, words))
+        return added
 
     def detect_language_runs(self, wav16k: Path, speech: list[tuple[float, float]],
                              cancel: Callable[[], bool] | None = None,
@@ -202,12 +292,14 @@ class Transcriber:
             if cancel and cancel():
                 raise InterruptedError
             audio = read_segment(wav16k, a, b)
-            pieces.extend(langid.split_segment(audio, a, b, probe))
+            pieces.extend(langid.split_segment(audio, a, b, probe, langid.CONF_BY_MODEL.get(self.model_name)))
             done += b - a
             if progress:
                 progress(done / total)
         filled = langid.fill_unsure(pieces)
         runs = langid.group_by_language(filled)
+        # 이웃 언어로 채운 '불확실' 조각(글이 안 나오면 recheck_unsure 가 다시 봄)
+        self.last_unsure = [(p.start, p.end, p.lang) for p in filled if not p.sure]
         self.last_lang_stats = {
             "pieces": len(filled), "unsure": sum(1 for p in pieces if not p.sure),
             "split_segments": len(pieces) - len(speech),

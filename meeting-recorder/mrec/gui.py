@@ -24,13 +24,13 @@ log = logging.getLogger("mrec")
 LANG_CHOICES = [("자동(영어/한국어)", None), ("영어", "en"), ("한국어", "ko")]
 SPK_CHOICES = [("자동", None)] + [(f"{n}명", n) for n in range(1, 9)]
 # 처리 품질: (화면 이름, 설정 값, whisper 모델)
-QUALITY_CHOICES = [("정확(기본)", "accurate", "turbo"), ("빠름", "fast", "small")]
+# R6: '빠름'(small)을 없애고 large-v3-turbo 하나만 씁니다(묶음 크기 축소). 언어 판별은 small.
+TRANSCRIBE_MODEL = "turbo"
 # 예상 처리 시간(녹음 길이 대비). 측정 근거: docs/라운드/R4/changes.md. 사용자 PC 는 더 느릴 수 있습니다.
-SPEED_NOTE = {"turbo": "처리 시간: 녹음 길이의 약 {m}배(4코어 기준 측정. 코어가 많으면 더 빠름)",
-              "small": "처리 시간: 녹음 길이의 약 {s}배(정확보다 빠르지만 한국어·용어 정확도가 낮음)"}
+SPEED_NOTE = "처리 시간: 녹음 길이의 약 {m}배(4코어 기준 측정. 코어가 많으면 더 빠름)"
 SILENT_WARN_S = 60  # 이 시간 동안 소리가 전혀 없으면 안내
 AUTO_DEVICE = "자동(윈도우에서 쓰는 장치 그대로)"
-SPEED_FACTOR = {"turbo": "0.4", "small": "0.3"}  # 4코어 컨테이너 측정(R4). 8코어 PC 는 더 빠를 수 있음
+SPEED_FACTOR = "0.4"  # 4코어 컨테이너 측정(R4·R6). 코어가 많으면 더 빠를 수 있음
 LOG_TAIL_LINES = 30
 
 
@@ -167,16 +167,9 @@ class App:
         self.spk_n_cb = ttk.Combobox(f, state="readonly", width=20, values=[n for n, _ in SPK_CHOICES])
         self.spk_n_cb.grid(row=1, column=1, sticky="w", padx=6)
         self.spk_n_cb.current(0)
-        ttk.Label(f, text="처리 품질").grid(row=2, column=0, sticky="w", padx=6, pady=3)
-        self.quality_cb = ttk.Combobox(f, state="readonly", width=20, values=[n for n, _, _ in QUALITY_CHOICES])
-        self.quality_cb.grid(row=2, column=1, sticky="w", padx=6)
-        q = self.settings.get("quality", "accurate")
-        self.quality_cb.current(next((i for i, (_, v, _) in enumerate(QUALITY_CHOICES) if v == q), 0))
-        self.speed_var = tk.StringVar(value="")
+        self.speed_var = tk.StringVar(value=SPEED_NOTE.format(m=SPEED_FACTOR))
         ttk.Label(f, textvariable=self.speed_var, foreground="#555").grid(
             row=3, column=0, columnspan=3, sticky="w", padx=6)
-        self.quality_cb.bind("<<ComboboxSelected>>", lambda e: self._update_speed_note())
-        self._update_speed_note()
         self.glossary_var = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.glossary_var, foreground="#555", wraplength=420).grid(
             row=4, column=0, columnspan=2, sticky="w", padx=6)
@@ -336,9 +329,8 @@ class App:
     def _check_models(self):
         missing = models.missing_models()
         if missing:
-            usable = [name for name, _, m in QUALITY_CHOICES if not models.missing_for(m)]
-            if usable:
-                self.status.set(f"일부 모델 파일이 없습니다. 지금은 처리 품질 '{usable[0]}' 만 쓸 수 있습니다.")
+            if not models.missing_for(TRANSCRIBE_MODEL, auto_language=False):
+                self.status.set("언어 판별 모델 파일이 없습니다. 회의 언어를 '영어' 나 '한국어' 로 정하면 처리할 수 있습니다.")
             else:
                 self.status.set("모델 파일이 없습니다. 압축을 다시 풀어 주십시오(models 폴더 필요).")
             log.error("모델 없음: %s", missing)
@@ -476,15 +468,6 @@ class App:
     def _spk_n(self):
         return SPK_CHOICES[max(0, self.spk_n_cb.current())][1]
 
-    def _quality(self) -> tuple[str, str]:
-        """(설정 값, whisper 모델)."""
-        _, value, model = QUALITY_CHOICES[max(0, self.quality_cb.current())]
-        return value, model
-
-    def _update_speed_note(self):
-        _, model = self._quality()
-        self.speed_var.set(SPEED_NOTE[model].format(m=SPEED_FACTOR["turbo"], s=SPEED_FACTOR["small"]))
-
     def _update_glossary_note(self):
         try:
             from . import glossary
@@ -505,19 +488,20 @@ class App:
         open_folder(d)
 
     def _start_job(self, job: pipeline.Job):
-        quality, model = self._quality()
+        model = TRANSCRIBE_MODEL
         miss = models.missing_for(model, self._lang() is None)
         if miss:
             log.error("모델 없음(%s): %s", model, miss)
-            other = "빠름" if model != "small" else "정확"
-            messagebox.showerror("모델 없음", "이 처리 품질에 필요한 모델 파일이 없어 글로 옮길 수 없습니다.\n"
-                                 f"처리 품질을 '{other}'으로 바꾸거나, 압축을 다시 풀어 주십시오.")
+            hint = ("회의 언어를 '영어' 나 '한국어' 로 정하거나, " if not models.missing_for(model, False) else "")
+            messagebox.showerror("모델 없음", "필요한 모델 파일이 없어 글로 옮길 수 없습니다.\n"
+                                 f"{hint}압축을 다시 풀어 주십시오.")
             return
-        job.model = model  # 다시 처리할 때도 지금 고른 품질을 씀
+        job.model = model
         job.mark_low_conf = bool(self.settings.get("mark_low_conf", pipeline.MARK_LOW_CONF_DEFAULT))
+        job.guard = bool(self.settings.get("tail_text_guard", True))  # 설정 파일에서 false 로 끌 수 있음
+        job.recheck_unsure = bool(self.settings.get("recheck_unsure", False))  # 기본 끔(R6 되돌림)
         self._update_glossary_note()  # 사용자가 용어 파일을 고쳤을 수 있음
-        self.settings.update({"language": self._lang(), "auto_process": bool(self.auto_var.get()),
-                              "quality": quality})
+        self.settings.update({"language": self._lang(), "auto_process": bool(self.auto_var.get())})
         paths.save_settings(self.settings)
         log.info("처리 시작: 모델 %s", model)
         self.processing = True
@@ -583,7 +567,7 @@ class App:
         self.prog["value"] = 100
         self.names_btn.configure(state="normal")
         n = len(res.speakers)
-        self.prog_var.set(f"끝났습니다. 발언 {res.utterances}개, 상대방 {n}명으로 구분했습니다.")
+        self.prog_var.set(pipeline.done_summary(res))
         self.status.set(f"결과: {self.last_folder}")
         if n and messagebox.askyesno("참석자 이름", f"상대방을 {n}명으로 구분했습니다.\n지금 참석자 이름을 정할까요?"):
             self.edit_names()

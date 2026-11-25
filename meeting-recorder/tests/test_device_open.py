@@ -7,6 +7,13 @@ from mrec.devices import (OPEN_COMBOS, DeviceOpenError, FakeBackend, _SoundcardS
                           pack_float_format, parse_wave_format)
 
 
+@pytest.fixture(autouse=True)
+def _clear_last_ok():
+    devices._LAST_OK.clear()
+    yield
+    devices._LAST_OK.clear()
+
+
 class FakeRec:
     def __init__(self, sr, ch):
         self.sr, self.ch = sr, ch or 2
@@ -130,3 +137,52 @@ def test_check_device_ok_and_failure():
     r = check_device(Bad(), "mic", "id", seconds=0.2)
     assert not r["ok"] and r["attempts"][0]["type"] == "AssertionError"
     assert "열지 못함" in check_text(r) and "AssertionError()" in check_text(r)
+
+
+def test_non_extensible_mix_skips_soundcard_and_reconnect_starts_with_last_ok(monkeypatch):
+    """R6(감사 R5 N1): 확장 형식이 아니면 덧붙인 soundcard 경로는 건너뛰고, 다시 열 때는 마지막 성공 방법부터.
+    수정 1회차(감사 R6 M1): R4 까지의 세 방법은 믹스 형식과 무관하게 먼저 그대로 시도."""
+    devices._LAST_OK.clear()
+    m = Mic(lambda sr, ch, b: True)
+    monkeypatch.setattr(devices, "read_mix_format", lambda mic, mf: {"tag": "0x3", "cbSize": 0, "channels": 1, "rate": 48000})
+    made = []
+    monkeypatch.setattr(devices, "make_direct_recorder", lambda mic, mf, sr, ch, buf: made.append(sr) or FakeRec(sr, ch))
+    src = _SoundcardSource(m, mf=object())
+    assert m.calls == [(16000, 1, 8000), (48000, 1, 24000), (44100, 1, 22050)]  # R4 까지의 세 방법은 그대로
+    assert src.combo.startswith("direct/16000Hz") and len(src.attempts) == 3
+    m2 = Mic(lambda sr, ch, b: False)  # 같은 장치 id, 이번에는 soundcard 도 될 수 있어도
+    monkeypatch.setattr(devices, "read_mix_format", lambda mic, mf: {"tag": "0xfffe", "cbSize": 22, "channels": 1, "rate": 48000})
+    src2 = _SoundcardSource(m2, mf=object())
+    assert src2.combo.startswith("direct/16000Hz") and m2.calls == []  # 마지막 성공 방법부터
+    devices._LAST_OK.clear()
+
+
+def test_legacy_combos_tried_before_mix_format_is_read(monkeypatch):
+    """감사 R6 M1: 열리던 장치는 믹스 형식을 읽기 전에 첫 방법으로 열리고, 읽기 실패도 열기를 막지 않음."""
+    reads = []
+
+    def boom(mic, mf):
+        reads.append(1)
+        raise OSError("GetMixFormat 실패")
+
+    monkeypatch.setattr(devices, "read_mix_format", boom)
+    m = Mic(lambda sr, ch, b: False)
+    src = _SoundcardSource(m, mf=object())
+    assert src.combo == OPEN_COMBOS[0].label() and reads == [] and src.attempts == []
+    # 세 방법이 실패하고 믹스 형식 읽기도 실패하면: 건너뛰지 않고 나머지 방법을 계속 시도
+    m2 = Mic(lambda sr, ch, b: ch == 1)
+    monkeypatch.setattr(devices, "make_direct_recorder", lambda *a: (_ for _ in ()).throw(OSError("x")))
+    src2 = _SoundcardSource(m2, mf=object())
+    assert src2.combo == "soundcard/48000Hz/장치값ch/버퍼기본" and reads
+    assert not any(a["type"] == "건너뜀" for a in src2.attempts)
+
+
+def test_non_extensible_mix_skips_only_the_added_soundcard_combo(monkeypatch):
+    m = Mic(lambda sr, ch, b: True)
+    monkeypatch.setattr(devices, "read_mix_format", lambda mic, mf: {"tag": "0x3", "cbSize": 0, "channels": 1, "rate": 48000})
+    monkeypatch.setattr(devices, "make_direct_recorder", lambda *a: (_ for _ in ()).throw(OSError("x")))
+    with pytest.raises(DeviceOpenError) as ei:
+        _SoundcardSource(m, mf=object())
+    kinds = [(a["combo"], a["type"]) for a in ei.value.attempts]
+    assert len(m.calls) == 3 and kinds[-1] == ("soundcard/48000Hz/장치값ch/버퍼기본", "건너뜀")
+    assert sum(t == "건너뜀" for _, t in kinds) == 1

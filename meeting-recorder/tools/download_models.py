@@ -22,18 +22,48 @@ sys.path.insert(0, str(ROOT))
 from mrec.models import FILES  # noqa: E402
 
 
+MIN_RATE = 256 * 1024     # 이보다 느린 상태가 STALL_S 동안 이어지면 끊고 다시 받음(바이트/초)
+STALL_S = 60
+FILE_DEADLINE_S = 900     # 파일 하나에 쓰는 최대 시간
+
+
+class SlowDownload(Exception):
+    pass
+
+
+def _copy_with_watchdog(r, f) -> None:
+    """받는 속도가 멈추거나 너무 느리면 예외(CI 가 한 단계에서 오래 멈추지 않게, R6)."""
+    start = last_ok = time.monotonic()
+    window_bytes = 0
+    while True:
+        chunk = r.read(1 << 20)
+        if not chunk:
+            return
+        f.write(chunk)
+        now = time.monotonic()
+        window_bytes += len(chunk)
+        if now - start > FILE_DEADLINE_S:
+            raise SlowDownload(f"파일 하나에 {FILE_DEADLINE_S}초 초과")
+        if window_bytes >= MIN_RATE * STALL_S or now - last_ok < STALL_S:
+            if window_bytes >= MIN_RATE * STALL_S:
+                last_ok, window_bytes = now, 0
+            continue
+        raise SlowDownload(f"{STALL_S}초 동안 평균 {window_bytes / STALL_S / 1024:.0f}KB/초")
+
+
 def fetch(url: str, dst: Path, tries: int = 4) -> None:
     for i in range(tries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "meeting-recorder-build"})
-            with urllib.request.urlopen(req, timeout=120) as r, open(dst, "wb") as f:
-                shutil.copyfileobj(r, f, 1 << 20)
+            # timeout: 연결·한 번 읽기마다의 제한(소켓). 전체 속도는 _copy_with_watchdog 가 봄.
+            with urllib.request.urlopen(req, timeout=60) as r, open(dst, "wb") as f:
+                _copy_with_watchdog(r, f)
             return
-        except Exception as e:  # 네트워크 일시 오류는 다시 시도
+        except Exception as e:  # 네트워크 일시 오류·멈춤은 다시 시도
             if i == tries - 1:
                 raise
             wait = 2 ** (i + 1)
-            print(f"  다시 시도 {i + 1}/{tries - 1} ({e}); {wait}초 뒤")
+            print(f"  다시 시도 {i + 1}/{tries - 1} ({type(e).__name__}: {e}); {wait}초 뒤", flush=True)
             time.sleep(wait)
 
 
@@ -55,6 +85,10 @@ def main(target: Path) -> int:
             out = target / f.rel
             if out.is_file() and (not f.sha256 or sha256(out) == f.sha256):
                 print(f"있음: {f.rel}")
+                continue
+            if f.convert:  # 받는 파일이 아니라 빌드 때 변환해 만드는 파일(tools/convert_turbo_int8.py)
+                print(f"변환 파일 없음 또는 해시 다름: {f.rel} (tools/convert_turbo_int8.py 로 만드십시오)")
+                bad.append(f.rel)
                 continue
             if f.url not in cache:
                 print(f"받는 중: {f.url}")
