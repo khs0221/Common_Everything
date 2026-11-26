@@ -220,6 +220,8 @@ class Transcriber:
             self._vocab = {w.strip(".-") for w in re.findall(r"[a-z0-9][a-z0-9&.\-]*", src.lower())}
         return self._vocab
 
+    TEMPERATURES = (0.0, 0.2)  # 고온(0.4~0.6) 재시도는 환각과 소요 시간을 늘려 2단계까지만 사용
+
     def _run(self, audio, language: str | None, words: bool, hints: bool = True):
         # hotwords: faster-whisper 1.2.1 은 30초 창마다 프롬프트 앞에 붙입니다(get_prompt).
         # initial_prompt 는 condition_on_previous_text=False 이면 묶음의 첫 창에만 쓰여 쓰지 않습니다(R4).
@@ -227,7 +229,7 @@ class Transcriber:
         segs, info = self.model.transcribe(
             audio, language=language, beam_size=self.beam_size, vad_filter=False,
             condition_on_previous_text=self.prev_text, word_timestamps=words, hotwords=hot,
-            without_timestamps=False, temperature=(0.0, 0.2, 0.4, 0.6),
+            without_timestamps=False, temperature=self.TEMPERATURES,
             log_prob_threshold=-1.0, no_speech_threshold=NO_SPEECH_THRESHOLD, compression_ratio_threshold=2.4)
         return list(segs), info
 

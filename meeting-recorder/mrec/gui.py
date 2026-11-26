@@ -100,6 +100,7 @@ class App:
         self.spks: list[DeviceInfo] = []
         self.last_folder: Path | None = None
         self.processing = False
+        self.bg_transcriber = None
         self.cancel_flag = threading.Event()
         self.silent_since = {"mic": None, "loop": None}
         self.last_devices: dict = {}
@@ -197,12 +198,16 @@ class App:
         self.auto_var = tk.BooleanVar(value=self.settings.get("auto_process", True))
         ttk.Checkbutton(f, text="녹음을 멈추면 바로 글로 옮기기", variable=self.auto_var).grid(
             row=7, column=0, columnspan=2, sticky="w", padx=6, pady=3)
+        self.bg_transcribe_var = tk.BooleanVar(value=bool(self.settings.get("bg_transcribe", False)))
+        ttk.Checkbutton(
+            f, text="녹음 중 미리 글로 옮기기 (끝난 뒤 대기 단축, PC 부하·팬 소음 증가 가능)",
+            variable=self.bg_transcribe_var).grid(row=8, column=0, columnspan=3, sticky="w", padx=6, pady=2)
         self.prog = ttk.Progressbar(f, maximum=100, length=300)
-        self.prog.grid(row=8, column=0, columnspan=2, sticky="we", padx=6, pady=4)
+        self.prog.grid(row=9, column=0, columnspan=2, sticky="we", padx=6, pady=4)
         self.cancel_btn = ttk.Button(f, text="처리 취소", command=self.cancel_processing, state="disabled")
-        self.cancel_btn.grid(row=8, column=2, padx=6)
+        self.cancel_btn.grid(row=9, column=2, padx=6)
         self.prog_var = tk.StringVar(value="")
-        ttk.Label(f, textvariable=self.prog_var).grid(row=9, column=0, columnspan=3, sticky="w", padx=6)
+        ttk.Label(f, textvariable=self.prog_var).grid(row=10, column=0, columnspan=3, sticky="w", padx=6)
         f.columnconfigure(1, weight=1)
 
         f = ttk.LabelFrame(self.root, text="4. 결과")
@@ -384,7 +389,8 @@ class App:
                                     "다시 시도해 주십시오.", "녹음 시작", _exc_text(e))
             messagebox.showerror("녹음 시작", f"녹음을 시작하지 못했습니다.\n장치 선택을 확인해 주십시오.\n\n{e}")
             return
-        self.settings.update({"mic_id": mic_id, "speaker_id": spk_id})  # None = 자동
+        self.settings.update({"mic_id": mic_id, "speaker_id": spk_id,
+                              "bg_transcribe": bool(self.bg_transcribe_var.get())})  # None = 자동
         paths.save_settings(self.settings)
         if self.backend_error is None:
             self._hide_device_error()
@@ -400,7 +406,20 @@ class App:
         self.last_devices = self.recorder.device_names()
         log.info("녹음 시작: 표본 주파수 %s, 장치 %s, 연 방법 %s, %s", sr, self.last_devices,
                  self.recorder.device_combos(), sysinfo.system_summary())
-        self.status.set(f"녹음 중… 저장 위치: {folder}")
+        self.bg_transcriber = None
+        if self.bg_transcribe_var.get() and not models.missing_for(TRANSCRIBE_MODEL, self._lang() is None):
+            from .bg_transcribe import BackgroundTranscriber
+
+            rec_ref = self.recorder
+            self.bg_transcriber = BackgroundTranscriber(
+                folder, language=self._lang(), model=TRANSCRIBE_MODEL,
+                extra_terms=self._meeting_terms(), mic_min_db=self._mic_min_db(),
+                guard=bool(self.settings.get("tail_text_guard", True)),
+                paused=lambda: bool(rec_ref and rec_ref.paused))
+            self.bg_transcriber.start()
+            self.status.set(f"녹음 중(미리 글로 옮기기 켜짐)… 저장 위치: {folder}")
+        else:
+            self.status.set(f"녹음 중… 저장 위치: {folder}")
 
     def toggle_pause(self):
         if not self.recorder or not self.recorder.running:
@@ -423,6 +442,13 @@ class App:
             return
         self.pause_btn.configure(text="❚❚ 일시정지", state="disabled")
         self.stop_btn.configure(state="disabled")
+        pre = None
+        if self.bg_transcriber is not None:
+            try:
+                pre = self.bg_transcriber.stop()
+            except Exception:
+                log.exception("미리 처리 중지 오류")
+            self.bg_transcriber = None
         try:
             res = self.recorder.stop()
         except Exception as e:
@@ -452,7 +478,9 @@ class App:
                 msg += f" (다시 연결 {reconn}번, 끊긴 동안은 무음)"
         self.status.set(msg)
         if self.auto_var.get():
-            self._start_job(pipeline.job_for_folder(res.folder, self._lang(), self._spk_n()))
+            job = pipeline.job_for_folder(res.folder, self._lang(), self._spk_n())
+            job.pre_transcribed = pre
+            self._start_job(job)
 
     def _tick(self):
         rec = self.recorder
@@ -553,7 +581,7 @@ class App:
         job.mic_min_db = self._mic_min_db()
         self._update_glossary_note()  # 사용자가 용어 파일을 고쳤을 수 있음
         self.settings.update({"language": self._lang(), "auto_process": bool(self.auto_var.get()),
-                              "mic_min_db": job.mic_min_db})
+                              "mic_min_db": job.mic_min_db, "bg_transcribe": bool(self.bg_transcribe_var.get())})
         paths.save_settings(self.settings)
         log.info("처리 시작: 모델 %s", model)
         self.processing = True
@@ -681,6 +709,12 @@ class App:
         if self.recorder and self.recorder.running:
             if not messagebox.askyesno("끝내기", "녹음 중입니다. 녹음을 멈추고 끝낼까요?\n(그때까지 녹음은 저장됩니다)"):
                 return
+            if self.bg_transcriber is not None:
+                try:
+                    self.bg_transcriber.stop(timeout=2.0)
+                except Exception:
+                    pass
+                self.bg_transcriber = None
             try:
                 self.recorder.stop()
             except Exception:

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import merge, output
-from .audio_io import TARGET_SR, prepare_16k_mono, wav_info
+from .audio_io import TARGET_SR, prepare_16k_mono, slice_to_16k_mono, wav_info
 from .recorder import INFO_FILE, LOOP_FILE, MIC_FILE
 
 log = logging.getLogger("mrec")
@@ -47,6 +47,7 @@ class Job:
     recheck_unsure: bool = False    # 불확실 짧은 조각 다시 보기(설정 "recheck_unsure", 기본 끔: changes.md 되돌림)
     extra_terms: list[str] = field(default_factory=list)  # GUI '이번 회의 용어'(인식 힌트·회의별 교정 최상단)
     mic_min_db: float | None = -40.0  # 마이크 최소 음량 컷(dBFS, None=끄기)
+    pre_transcribed: object | None = None  # 녹음 중 백그라운드 미리 전사 결과(PreTranscribed)
 
 
 @dataclass
@@ -99,6 +100,15 @@ def job_for_folder(folder: Path, language: str | None, num_speakers: int | None)
                language, num_speakers, meta=meta)
 
 
+def _shift_seg(seg, offset: float):
+    from .transcribe import Segment, Word
+
+    if offset == 0.0:
+        return seg
+    ws = [Word(w.start + offset, w.end + offset, w.text, w.prob) for w in seg.words]
+    return Segment(seg.start + offset, seg.end + offset, seg.text, seg.lang, ws)
+
+
 def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool] | None = None) -> JobResult:
     from . import diarize, vad
     from .transcribe import Transcriber
@@ -118,43 +128,84 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         pr.part(0.5)
         loop16 = prepare_16k_mono(job.loop, work / "loop16k.wav") if job.loop else None
         timings["prepare"] = time.monotonic() - t
-        lengths = [wav_info(p)[2] / TARGET_SR for p in (mic16, loop16) if p]
+        track_durs = {
+            "mic": wav_info(mic16)[2] / TARGET_SR if mic16 else 0.0,
+            "loop": wav_info(loop16)[2] / TARGET_SR if loop16 else 0.0,
+        }
+        lengths = [d for d in track_durs.values() if d > 0]
         audio_seconds = max(lengths) if lengths else 0.0
 
-        # 2) 말소리 구간
+        # 녹음 중 미리 전사된 결과가 현재 설정과 일치하면 재사용하고 남은 꼬리 구간만 처리합니다.
+        pre = job.pre_transcribed
+        if (pre is not None and getattr(pre, "language", None) == job.language
+                and getattr(pre, "model", None) == job.model
+                and getattr(pre, "mic_min_db", None) == job.mic_min_db):
+            pre_tracks = getattr(pre, "tracks", {}) or {}
+        else:
+            pre_tracks = {}
+
+        # 2) 말소리 구간 (미리 처리된 트랙은 남은 꼬리 구간만 VAD)
         pr.step(1)
         t = time.monotonic()
         gains = {}
-        mic_segs = vad.speech_segments(mic16, lambda f: pr.part(f * 0.5), cancel=cancel,
-                                       min_db=job.mic_min_db) if mic16 else []
-        if mic16:
-            gains["mic"] = round(getattr(vad.speech_segments, "last_gain", 1.0), 2)
-        loop_segs = vad.speech_segments(loop16, lambda f: pr.part(0.5 + f * 0.5), cancel=cancel) if loop16 else []
-        if loop16:
-            gains["loop"] = round(getattr(vad.speech_segments, "last_gain", 1.0), 2)
+        asr_wav: dict[str, Path | None] = {"mic": mic16, "loop": loop16}
+        asr_segs: dict[str, list[tuple[float, float]]] = {"mic": [], "loop": []}
+        asr_offset: dict[str, float] = {"mic": 0.0, "loop": 0.0}
+        all_segs: dict[str, list[tuple[float, float]]] = {"mic": [], "loop": []}
+
+        for idx_k, (key, wav16, min_db) in enumerate((("mic", mic16, job.mic_min_db), ("loop", loop16, None))):
+            if not wav16:
+                continue
+            tp = pre_tracks.get(key)
+            done_to = float(tp.done_up_to) if (tp is not None and getattr(tp, "done_up_to", 0.0) > 0.0) else 0.0
+            if done_to > 0.0:
+                asr_offset[key] = done_to
+                if track_durs[key] - done_to >= 0.2:
+                    tail_wav = slice_to_16k_mono(wav16, work / f"{key}_tail16k.wav", done_to, track_durs[key])
+                    asr_wav[key] = tail_wav
+                    t_segs = vad.speech_segments(tail_wav, lambda f, i=idx_k: pr.part(i * 0.5 + f * 0.5),
+                                                 cancel=cancel, min_db=min_db)
+                    gains[key] = round(getattr(vad.speech_segments, "last_gain", 1.0), 2)
+                else:
+                    asr_wav[key] = None
+                    t_segs = []
+                asr_segs[key] = t_segs
+                all_segs[key] = list(tp.speech) + [(a + done_to, b + done_to) for a, b in t_segs]
+            else:
+                segs = vad.speech_segments(wav16, lambda f, i=idx_k: pr.part(i * 0.5 + f * 0.5),
+                                           cancel=cancel, min_db=min_db)
+                gains[key] = round(getattr(vad.speech_segments, "last_gain", 1.0), 2)
+                asr_segs[key] = segs
+                all_segs[key] = segs
+
         if any(g > 1.0 for g in gains.values()):
             log.info("말소리 찾기 음량 보정 배율: %s", gains)
         timings["vad"] = time.monotonic() - t
 
-        # 3) 발언자 구분(스피커 트랙). 1:1 회의(상대방 1명)는 화자 분리를 생략합니다.
+        # 3) 발언자 구분(스피커 트랙). 1:1 회의(상대방 1명)는 화자 분리를 생략하고, 다자 회의는 말소리 구간만 패킹해 처리합니다.
         pr.step(2)
         t = time.monotonic()
         turns = []
-        if loop16 and loop_segs:
+        if loop16 and all_segs["loop"]:
             if job.num_speakers == 1:
                 log.info("상대방 1명(1:1 회의): 화자 분리 생략")
                 pr.part(1.0)
             else:
-                turns = diarize.diarize_file(loop16, job.num_speakers, progress=pr.part, cancel=cancel)
+                turns = diarize.diarize_file(loop16, job.num_speakers, progress=pr.part, cancel=cancel,
+                                             speech=all_segs["loop"])
         gc.collect()
         timings["diarize"] = time.monotonic() - t
 
         # 4) 언어 판별(자동일 때) → 글로 옮기기. 두 모델을 동시에 메모리에 올리지 않습니다.
-        mic_out, loop_out = [], []
-        dropped: dict = {"mic": [], "loop": []}  # 거른 글의 원래 시각(트랙별)
+        mic_out = list(pre_tracks["mic"].segments) if ("mic" in pre_tracks and pre_tracks["mic"].done_up_to > 0) else []
+        loop_out = list(pre_tracks["loop"].segments) if ("loop" in pre_tracks and pre_tracks["loop"].done_up_to > 0) else []
+        dropped: dict = {
+            "mic": list(pre_tracks["mic"].dropped) if ("mic" in pre_tracks and pre_tracks["mic"].done_up_to > 0) else [],
+            "loop": list(pre_tracks["loop"].dropped) if ("loop" in pre_tracks and pre_tracks["loop"].done_up_to > 0) else [],
+        }
         lang_stats: dict = {}
         hint = {}
-        if mic_segs or loop_segs:  # 말소리가 하나도 없으면 모델을 읽지 않습니다
+        if asr_segs["mic"] or asr_segs["loop"]:  # 남은 말소리가 없으면 모델을 읽지 않습니다
             from . import glossary
 
             lid_name = job.lid_model or job.model
@@ -165,7 +216,8 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
             tr = None
             if job.language is None:
                 lid = Transcriber(beam_size=job.beam_size, model=lid_name)
-                for key, wav, segs, w0 in (("mic", mic16, mic_segs, 0.0), ("loop", loop16, loop_segs, 0.5)):
+                for key, w0 in (("mic", 0.0), ("loop", 0.5)):
+                    wav, segs = asr_wav[key], asr_segs[key]
                     if wav and segs:
                         runs[key] = lid.detect_language_runs(wav, segs, cancel=cancel,
                                                              progress=lambda f, w0=w0: pr.part(w0 + f * 0.5))
@@ -191,20 +243,26 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
             timings["load_asr"] = time.monotonic() - t
             pr.step(5)
             t = time.monotonic()
-            if mic16 and mic_segs:
-                mic_out = tr.transcribe_file(mic16, mic_segs, job.language, words=True,
-                                             progress=pr.part, cancel=cancel, runs=runs["mic"],
-                                             recheck=unsure["mic"])
+            if asr_wav["mic"] and asr_segs["mic"]:
+                off = asr_offset["mic"]
+                tail_mic = tr.transcribe_file(asr_wav["mic"], asr_segs["mic"], job.language, words=True,
+                                              progress=pr.part, cancel=cancel, runs=runs["mic"],
+                                              recheck=unsure["mic"])
+                mic_out.extend(_shift_seg(s, off) for s in tail_mic)
+                dropped["mic"].extend(round(t0 + off, 1) for t0, _ in tr.dropped)
+                tr.dropped = []
             timings["asr_mic"] = time.monotonic() - t
-            dropped["mic"], tr.dropped = [round(t0, 1) for t0, _ in tr.dropped], []
             pr.step(6)
             t = time.monotonic()
-            if loop16 and loop_segs:
-                loop_out = tr.transcribe_file(loop16, loop_segs, job.language, words=True,
-                                              progress=pr.part, cancel=cancel, runs=runs["loop"],
-                                              recheck=unsure["loop"])
+            if asr_wav["loop"] and asr_segs["loop"]:
+                off = asr_offset["loop"]
+                tail_loop = tr.transcribe_file(asr_wav["loop"], asr_segs["loop"], job.language, words=True,
+                                               progress=pr.part, cancel=cancel, runs=runs["loop"],
+                                               recheck=unsure["loop"])
+                loop_out.extend(_shift_seg(s, off) for s in tail_loop)
+                dropped["loop"].extend(round(t0 + off, 1) for t0, _ in tr.dropped)
+                tr.dropped = []
             timings["asr_loop"] = time.monotonic() - t
-            dropped["loop"], tr.dropped = [round(t0, 1) for t0, _ in tr.dropped], []
             del tr
             gc.collect()
 
@@ -225,6 +283,8 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         meta["vad_gain"] = gains
         meta["mic_min_db"] = job.mic_min_db
         meta["recheck_unsure"] = bool(job.recheck_unsure)
+        if pre_tracks:
+            meta["bg_pre_seconds"] = {k: round(v.done_up_to, 1) for k, v in pre_tracks.items() if v.done_up_to > 0}
         if job.extra_terms:
             meta["meeting_terms"] = list(job.extra_terms)
         n_dropped = sum(len(v) for v in dropped.values())
