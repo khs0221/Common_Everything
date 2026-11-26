@@ -22,7 +22,13 @@ from .recorder import LOOP_FILE, MIC_FILE, Recorder, new_meeting_folder
 log = logging.getLogger("mrec")
 
 LANG_CHOICES = [("자동(영어/한국어)", None), ("영어", "en"), ("한국어", "ko")]
-SPK_CHOICES = [("자동", None)] + [(f"{n}명", n) for n in range(1, 9)]
+SPK_CHOICES = [("자동", None)] + [(f"{n}명", n) for n in range(1, 13)]
+MIC_CUT_CHOICES = [
+    ("끔 (모든 소리)", None),
+    ("약하게 (-50 dB)", -50.0),
+    ("보통 (-40 dB, 기본)", -40.0),
+    ("강하게 (-30 dB)", -30.0),
+]
 # 처리 품질: (화면 이름, 설정 값, whisper 모델)
 # R6: '빠름'(small)을 없애고 large-v3-turbo 하나만 씁니다(묶음 크기 축소). 언어 판별은 small.
 TRANSCRIBE_MODEL = "turbo"
@@ -136,25 +142,27 @@ class App:
         f.pack(fill="x", **pad)
         self.start_btn = ttk.Button(f, text="● 녹음 시작", command=self.start_recording)
         self.start_btn.grid(row=0, column=0, padx=6, pady=6)
+        self.pause_btn = ttk.Button(f, text="❚❚ 일시정지", command=self.toggle_pause, state="disabled")
+        self.pause_btn.grid(row=0, column=1, padx=6)
         self.stop_btn = ttk.Button(f, text="■ 중지", command=self.stop_recording, state="disabled")
-        self.stop_btn.grid(row=0, column=1, padx=6)
+        self.stop_btn.grid(row=0, column=2, padx=6)
         self.elapsed_var = tk.StringVar(value="00:00:00")
-        ttk.Label(f, textvariable=self.elapsed_var, font=("Segoe UI", 16)).grid(row=0, column=2, padx=12)
+        ttk.Label(f, textvariable=self.elapsed_var, font=("Segoe UI", 16)).grid(row=0, column=3, padx=12)
         ttk.Label(f, text="나(마이크)").grid(row=1, column=0, sticky="w", padx=6)
         self.mic_bar = ttk.Progressbar(f, maximum=100, length=300)
-        self.mic_bar.grid(row=1, column=1, columnspan=2, sticky="we", padx=6, pady=2)
+        self.mic_bar.grid(row=1, column=1, columnspan=3, sticky="we", padx=6, pady=2)
         ttk.Label(f, text="상대방(스피커)").grid(row=2, column=0, sticky="w", padx=6)
         self.loop_bar = ttk.Progressbar(f, maximum=100, length=300)
-        self.loop_bar.grid(row=2, column=1, columnspan=2, sticky="we", padx=6, pady=2)
+        self.loop_bar.grid(row=2, column=1, columnspan=3, sticky="we", padx=6, pady=2)
         self.rec_warn = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.rec_warn, foreground="#b35c00", wraplength=520).grid(
-            row=3, column=0, columnspan=3, sticky="w", padx=6)
+            row=3, column=0, columnspan=4, sticky="w", padx=6)
         # 장치 끊김 등 지금 녹음에 문제가 있을 때 띄우는 빨간 경고
         self.rec_alarm = tk.StringVar(value="")
         self.alarm_label = tk.Label(f, textvariable=self.rec_alarm, fg="white", bg="#c62828",
                                     font=("Segoe UI", 11, "bold"), wraplength=520, justify="left")
         self._alarm_shown = False
-        f.columnconfigure(2, weight=1)
+        f.columnconfigure(3, weight=1)
 
         f = ttk.LabelFrame(self.root, text="3. 글로 옮기기")
         f.pack(fill="x", **pad)
@@ -167,23 +175,34 @@ class App:
         self.spk_n_cb = ttk.Combobox(f, state="readonly", width=20, values=[n for n, _ in SPK_CHOICES])
         self.spk_n_cb.grid(row=1, column=1, sticky="w", padx=6)
         self.spk_n_cb.current(0)
+        ttk.Label(f, text="마이크 소음 차단").grid(row=2, column=0, sticky="w", padx=6, pady=3)
+        self.mic_cut_cb = ttk.Combobox(f, state="readonly", width=20, values=[n for n, _ in MIC_CUT_CHOICES])
+        self.mic_cut_cb.grid(row=2, column=1, sticky="w", padx=6)
+        saved_cut = self.settings.get("mic_min_db", -40.0) if "mic_min_db" in self.settings else -40.0
+        self.mic_cut_cb.current(next((i for i, (_, v) in enumerate(MIC_CUT_CHOICES) if v == saved_cut), 2))
+        ttk.Label(f, text="이번 회의 용어").grid(row=3, column=0, sticky="w", padx=6, pady=3)
+        self.meeting_terms_var = tk.StringVar(value="")
+        self.meeting_terms_entry = ttk.Entry(f, textvariable=self.meeting_terms_var, width=42)
+        self.meeting_terms_entry.grid(row=3, column=1, columnspan=2, sticky="we", padx=6, pady=3)
+        ttk.Label(f, text="쉼표로 구분해 넣으면 이번 회의의 인식 힌트와 교정 용어 최상단에 우선 반영됩니다.",
+                  foreground="#555").grid(row=4, column=0, columnspan=3, sticky="w", padx=6)
         self.speed_var = tk.StringVar(value=SPEED_NOTE.format(m=SPEED_FACTOR))
         ttk.Label(f, textvariable=self.speed_var, foreground="#555").grid(
-            row=3, column=0, columnspan=3, sticky="w", padx=6)
+            row=5, column=0, columnspan=3, sticky="w", padx=6)
         self.glossary_var = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.glossary_var, foreground="#555", wraplength=420).grid(
-            row=4, column=0, columnspan=2, sticky="w", padx=6)
-        ttk.Button(f, text="용어 파일 열기", command=self.open_glossary).grid(row=4, column=2, padx=6, pady=2)
+            row=6, column=0, columnspan=2, sticky="w", padx=6)
+        ttk.Button(f, text="용어 파일 열기", command=self.open_glossary).grid(row=6, column=2, padx=6, pady=2)
         self._update_glossary_note()
         self.auto_var = tk.BooleanVar(value=self.settings.get("auto_process", True))
         ttk.Checkbutton(f, text="녹음을 멈추면 바로 글로 옮기기", variable=self.auto_var).grid(
-            row=5, column=0, columnspan=2, sticky="w", padx=6, pady=3)
+            row=7, column=0, columnspan=2, sticky="w", padx=6, pady=3)
         self.prog = ttk.Progressbar(f, maximum=100, length=300)
-        self.prog.grid(row=6, column=0, columnspan=2, sticky="we", padx=6, pady=4)
+        self.prog.grid(row=8, column=0, columnspan=2, sticky="we", padx=6, pady=4)
         self.cancel_btn = ttk.Button(f, text="처리 취소", command=self.cancel_processing, state="disabled")
-        self.cancel_btn.grid(row=6, column=2, padx=6)
+        self.cancel_btn.grid(row=8, column=2, padx=6)
         self.prog_var = tk.StringVar(value="")
-        ttk.Label(f, textvariable=self.prog_var).grid(row=7, column=0, columnspan=3, sticky="w", padx=6)
+        ttk.Label(f, textvariable=self.prog_var).grid(row=9, column=0, columnspan=3, sticky="w", padx=6)
         f.columnconfigure(1, weight=1)
 
         f = ttk.LabelFrame(self.root, text="4. 결과")
@@ -373,6 +392,7 @@ class App:
         self.last_folder = folder
         self.silent_since = {"mic": time.monotonic(), "loop": time.monotonic()}
         self.start_btn.configure(state="disabled")
+        self.pause_btn.configure(text="❚❚ 일시정지", state="normal")
         self.stop_btn.configure(state="normal")
         for w in (self.mic_cb, self.spk_cb, self.reproc_btn, self.file_btn):
             w.configure(state="disabled")
@@ -382,9 +402,26 @@ class App:
                  self.recorder.device_combos(), sysinfo.system_summary())
         self.status.set(f"녹음 중… 저장 위치: {folder}")
 
+    def toggle_pause(self):
+        if not self.recorder or not self.recorder.running:
+            return
+        if self.recorder.paused:
+            self.recorder.resume()
+            self.pause_btn.configure(text="❚❚ 일시정지")
+            now = time.monotonic()
+            self.silent_since = {"mic": now, "loop": now}
+            self.status.set(f"녹음 중… 저장 위치: {self.last_folder}")
+        else:
+            self.recorder.pause()
+            self.pause_btn.configure(text="▶ 재개")
+            self.mic_bar["value"] = self.loop_bar["value"] = 0
+            self.rec_warn.set("")
+            self.status.set("일시정지됨 (재개를 누르면 이어서 녹음합니다)")
+
     def stop_recording(self):
         if not self.recorder or not self.recorder.running:
             return
+        self.pause_btn.configure(text="❚❚ 일시정지", state="disabled")
         self.stop_btn.configure(state="disabled")
         try:
             res = self.recorder.stop()
@@ -421,23 +458,27 @@ class App:
         rec = self.recorder
         if rec and rec.running:
             self.elapsed_var.set(fmt_elapsed(rec.elapsed()))
-            lv = rec.levels()
-            now = time.monotonic()
-            warns = []
-            for key, bar, label in (("mic", self.mic_bar, "내 마이크"), ("loop", self.loop_bar, "상대방 소리")):
-                db = lv.get(key, -90.0)
-                bar["value"] = max(0.0, min(100.0, (db + 60.0) / 60.0 * 100.0))
-                if db > -55.0:
-                    self.silent_since[key] = now
-                elif self.silent_since[key] and now - self.silent_since[key] > SILENT_WARN_S:
-                    warns.append(f"{label}가 1분 넘게 조용합니다. 장치 선택을 확인해 주십시오.")
-                    if key == "loop":
-                        warns.append("원격(가상) PC 에서는 회의 소리가 이 PC 를 거치지 않고 사용 중인 단말에서 바로 "
-                                     "나올 수 있어, 이 프로그램이 상대방 소리를 녹음하지 못할 수 있습니다.")
-            if any(w.startswith("내 마이크") for w in warns):
-                warns.append("윈도우 설정 → 개인 정보 및 보안 → 마이크에서 '데스크톱 앱이 마이크에 "
-                             "액세스하도록 허용' 이 켜져 있는지도 확인해 주십시오.")
-            self.rec_warn.set(" ".join(warns))
+            if rec.paused:
+                self.mic_bar["value"] = self.loop_bar["value"] = 0
+                self.rec_warn.set("")
+            else:
+                lv = rec.levels()
+                now = time.monotonic()
+                warns = []
+                for key, bar, label in (("mic", self.mic_bar, "내 마이크"), ("loop", self.loop_bar, "상대방 소리")):
+                    db = lv.get(key, -90.0)
+                    bar["value"] = max(0.0, min(100.0, (db + 60.0) / 60.0 * 100.0))
+                    if db > -55.0:
+                        self.silent_since[key] = now
+                    elif self.silent_since[key] and now - self.silent_since[key] > SILENT_WARN_S:
+                        warns.append(f"{label}가 1분 넘게 조용합니다. 장치 선택을 확인해 주십시오.")
+                        if key == "loop":
+                            warns.append("원격(가상) PC 에서는 회의 소리가 이 PC 를 거치지 않고 사용 중인 단말에서 바로 "
+                                         "나올 수 있어, 이 프로그램이 상대방 소리를 녹음하지 못할 수 있습니다.")
+                if any(w.startswith("내 마이크") for w in warns):
+                    warns.append("윈도우 설정 → 개인 정보 및 보안 → 마이크에서 '데스크톱 앱이 마이크에 "
+                                 "액세스하도록 허용' 이 켜져 있는지도 확인해 주십시오.")
+                self.rec_warn.set(" ".join(warns))
             self._show_alarm(rec.problems())
         self._drain_queue()
         self.root.after(200, self._tick)
@@ -447,7 +488,7 @@ class App:
         if problems:
             self.rec_alarm.set("⚠ " + " ".join(problems.values()))
             if not self._alarm_shown:
-                self.alarm_label.grid(row=4, column=0, columnspan=3, sticky="we", padx=6, pady=4)
+                self.alarm_label.grid(row=4, column=0, columnspan=4, sticky="we", padx=6, pady=4)
                 self.root.title("⚠ 녹음 장치 문제 - 회의 녹음·기록")
                 try:
                     self.root.bell()
@@ -467,6 +508,14 @@ class App:
 
     def _spk_n(self):
         return SPK_CHOICES[max(0, self.spk_n_cb.current())][1]
+
+    def _mic_min_db(self) -> float | None:
+        return MIC_CUT_CHOICES[max(0, self.mic_cut_cb.current())][1]
+
+    def _meeting_terms(self) -> list[str]:
+        from . import glossary
+
+        return glossary.parse_terms(self.meeting_terms_var.get())
 
     def _update_glossary_note(self):
         try:
@@ -500,8 +549,11 @@ class App:
         job.mark_low_conf = bool(self.settings.get("mark_low_conf", pipeline.MARK_LOW_CONF_DEFAULT))
         job.guard = bool(self.settings.get("tail_text_guard", True))  # 설정 파일에서 false 로 끌 수 있음
         job.recheck_unsure = bool(self.settings.get("recheck_unsure", False))  # 기본 끔(R6 되돌림)
+        job.extra_terms = self._meeting_terms()
+        job.mic_min_db = self._mic_min_db()
         self._update_glossary_note()  # 사용자가 용어 파일을 고쳤을 수 있음
-        self.settings.update({"language": self._lang(), "auto_process": bool(self.auto_var.get())})
+        self.settings.update({"language": self._lang(), "auto_process": bool(self.auto_var.get()),
+                              "mic_min_db": job.mic_min_db})
         paths.save_settings(self.settings)
         log.info("처리 시작: 모델 %s", model)
         self.processing = True
@@ -642,6 +694,8 @@ class App:
 
 
 class NamesDialog:
+    MAX_BODY_HEIGHT = 480
+
     def __init__(self, parent, folder: Path, utts, names: dict, status: tk.StringVar):
         self.folder = folder
         self.status = status
@@ -650,8 +704,15 @@ class NamesDialog:
         self.top.transient(parent)
         ttk.Label(self.top, text="대표 발언을 보고 이름을 적어 주십시오. 비워 두면 '참석자 N' 으로 남습니다.",
                   wraplength=560).pack(anchor="w", padx=10, pady=6)
-        body = ttk.Frame(self.top)
-        body.pack(fill="both", expand=True, padx=10)
+        container = ttk.Frame(self.top)
+        container.pack(fill="both", expand=True, padx=10)
+        self.canvas = tk.Canvas(container, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.scrollbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        body = ttk.Frame(self.canvas)
+        self._body_win = self.canvas.create_window((0, 0), window=body, anchor="nw")
         self.entries: dict[str, tk.StringVar] = {}
         keys = ([merge.ME] if any(u.speaker == merge.ME for u in utts) else []) + merge.speakers_in(utts)
         row = 0
@@ -667,6 +728,28 @@ class NamesDialog:
                 ttk.Label(body, text=text, wraplength=380, foreground="#444").grid(
                     row=row, column=2, sticky="w", pady=4)
             row += 1
+
+        def _sync_scroll(_event=None):
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+        body.bind("<Configure>", _sync_scroll)
+        body.update_idletasks()
+        req_w = max(body.winfo_reqwidth(), 520)
+        req_h = min(body.winfo_reqheight(), self.MAX_BODY_HEIGHT)
+        self.canvas.configure(width=req_w, height=req_h, scrollregion=self.canvas.bbox("all"))
+
+        def _on_wheel(event):
+            if event.num == 4:
+                self.canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.canvas.yview_scroll(1, "units")
+            elif event.delta:
+                self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        self.top.bind("<MouseWheel>", _on_wheel)
+        self.top.bind("<Button-4>", _on_wheel)
+        self.top.bind("<Button-5>", _on_wheel)
+
         btns = ttk.Frame(self.top)
         btns.pack(fill="x", padx=10, pady=8)
         ttk.Button(btns, text="저장", command=self.save).pack(side="right", padx=4)

@@ -45,6 +45,8 @@ class Job:
     mark_low_conf: bool = MARK_LOW_CONF_DEFAULT  # 대화록.txt·Copilot용.txt 에 확신 낮은 단어 (?) 표시
     guard: bool = True              # 소리가 거의 없는 30초 창의 글 거르기(설정 "tail_text_guard")
     recheck_unsure: bool = False    # 불확실 짧은 조각 다시 보기(설정 "recheck_unsure", 기본 끔: changes.md 되돌림)
+    extra_terms: list[str] = field(default_factory=list)  # GUI '이번 회의 용어'(인식 힌트·회의별 교정 최상단)
+    mic_min_db: float | None = -40.0  # 마이크 최소 음량 컷(dBFS, None=끄기)
 
 
 @dataclass
@@ -123,7 +125,8 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         pr.step(1)
         t = time.monotonic()
         gains = {}
-        mic_segs = vad.speech_segments(mic16, lambda f: pr.part(f * 0.5), cancel=cancel) if mic16 else []
+        mic_segs = vad.speech_segments(mic16, lambda f: pr.part(f * 0.5), cancel=cancel,
+                                       min_db=job.mic_min_db) if mic16 else []
         if mic16:
             gains["mic"] = round(getattr(vad.speech_segments, "last_gain", 1.0), 2)
         loop_segs = vad.speech_segments(loop16, lambda f: pr.part(0.5 + f * 0.5), cancel=cancel) if loop16 else []
@@ -133,12 +136,16 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
             log.info("말소리 찾기 음량 보정 배율: %s", gains)
         timings["vad"] = time.monotonic() - t
 
-        # 3) 발언자 구분(스피커 트랙)
+        # 3) 발언자 구분(스피커 트랙). 1:1 회의(상대방 1명)는 화자 분리를 생략합니다.
         pr.step(2)
         t = time.monotonic()
         turns = []
         if loop16 and loop_segs:
-            turns = diarize.diarize_file(loop16, job.num_speakers, progress=pr.part, cancel=cancel)
+            if job.num_speakers == 1:
+                log.info("상대방 1명(1:1 회의): 화자 분리 생략")
+                pr.part(1.0)
+            else:
+                turns = diarize.diarize_file(loop16, job.num_speakers, progress=pr.part, cancel=cancel)
         gc.collect()
         timings["diarize"] = time.monotonic() - t
 
@@ -172,7 +179,7 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
             timings["lid"] = time.monotonic() - t
             pr.step(4)
             t = time.monotonic()
-            hint = glossary.load_hints() if job.hints else {}
+            hint = glossary.load_hints(extra_terms=job.extra_terms) if (job.hints or job.extra_terms) else {}
             if tr is None:
                 tr = Transcriber(beam_size=job.beam_size, model=job.model, hotwords=hint.get("hotwords"),
                                  hint_vocab_text=hint.get("terms_text"))
@@ -216,7 +223,10 @@ def run(job: Job, progress: ProgressCb | None = None, cancel: Callable[[], bool]
         meta["model"] = job.model
         meta["low_conf_marks"] = bool(job.mark_low_conf)
         meta["vad_gain"] = gains
+        meta["mic_min_db"] = job.mic_min_db
         meta["recheck_unsure"] = bool(job.recheck_unsure)
+        if job.extra_terms:
+            meta["meeting_terms"] = list(job.extra_terms)
         n_dropped = sum(len(v) for v in dropped.values())
         meta["tail_text_guard"] = {"on": bool(job.guard), "dropped": n_dropped,
                                    "times": {k: v for k, v in dropped.items() if v}}

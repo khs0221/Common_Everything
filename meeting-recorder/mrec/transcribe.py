@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import bisect
+import logging
 import os
 import re
 import sys
+import time
 import types
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,37 +55,95 @@ class Segment:
     words: list[Word] = field(default_factory=list)
 
 
+log = logging.getLogger("mrec")
+
 HALLUCINATION_GUARD = True  # 기본값. 설정 파일(settings.json)의 "tail_text_guard": false 로 끌 수 있음(pipeline.Job.guard)
 # '불확실' 조각에서 글이 안 나오면 그 조각만 언어를 다시 보고 옮김(R6 수정 2회차). 윈도우 CI 에서 짧은 말·작은
 # 목소리 트랙의 영어 1개가 한글로 적힌 실행이 있었고(리눅스 재현 안 됨) 원인에서 배제할 수 없어 기본 끔(되돌림).
 # 설정 "recheck_unsure": true 로만 켜집니다(pipeline.Job.recheck_unsure → Transcriber.recheck).
 RECHECK_UNSURE = False
+RECHECK_MAX_COUNT = 30      # 긴 회의에서 불확실 조각 다시 보기 최대 건수
+RECHECK_MAX_SECONDS = 60.0  # 긴 회의에서 불확실 조각 다시 보기 최대 시간(초)
+NO_SPEECH_THRESHOLD = 0.45  # 무음 구간 환각 차단 강화(기존 0.6 → 0.45)
 TAIL_S = 1.0     # 첫 창이 아닌 30초 창에 남은 소리가 이보다 짧을 때만 검사
 MAX_RATE = 20.0  # 초당 말 단위(한글 음절, 영어 낱말) 상한. 빠른 말도 한국어 약 9음절/초, 영어 약 5낱말/초
 FRAME_S = 0.01   # faster-whisper 의 seek 단위(멜 프레임 10ms)
+HALLUC_QUIET_DB = -45.0  # 대표 환각 문구가 이 음량(dBFS) 미만 구간에서 나오면 묵음 환각으로 차단
+_HALLUC_FRAME = 512
 _UNIT = re.compile(r"[가-힣]|[A-Za-z0-9']+")
+_HALLUC_PUNCT = " \t\r\n.,!?~…·\"'“”‘’()[]。！？"
+_HALLUC_SPLIT = re.compile(r"[.!?\n。！？]+")
+HALLUCINATION_PHRASES = frozenset({
+    "thank you", "thank you very much", "thanks", "thanks for watching",
+    "thanks for listening", "thank you for watching", "thank you for listening",
+    "감사합니다", "고맙습니다", "시청해주셔서 감사합니다", "시청해 주셔서 감사합니다",
+    "구독과 좋아요", "구독 좋아요", "mbc 뉴스", "자막 제공", "한글자막",
+})
+
+
+def _norm_halluc_phrase(text: str) -> str:
+    return " ".join(text.strip(_HALLUC_PUNCT).lower().split())
+
+
+def _halluc_parts(text: str) -> list[str] | None:
+    """텍스트가 모두 대표 묵음 환각 문구로만 이루어졌으면 정규화된 조각 목록, 아니면 None."""
+    parts = [_norm_halluc_phrase(p) for p in _HALLUC_SPLIT.split(text)]
+    parts = [p for p in parts if p]
+    if not parts:
+        return None
+    return parts if all(p in HALLUCINATION_PHRASES for p in parts) else None
 
 
 class HallucinationGuard:
-    """소리가 거의 없는 30초 창에서 나온, 말할 수 없는 속도의 글 거르기(R6 수정 1회차, 수정 2회차에 좁힘).
+    """묵음·소음 구간에서 whisper 가 지어내는 글 거르기.
 
-    whisper 는 묶음을 30초 창으로 나눠 옮깁니다. 앞 창이 묶음 끝 가까이에서 끝나면 마지막 창에는 말소리 구간
-    끝의 여유(0.2~0.4초)와 무음 채움만 남고, 거기서 말하지 않은 "감사합니다." 가 0.04~0.06초 길이로
-    나왔습니다(turbo 는 무음 확률이 늘 0 이라 whisper 기본 거르기가 듣지 않음). 그래서 세 조건이 모두 맞을
-    때만 버립니다: 첫 창이 아님, 그 창에 남은 소리가 TAIL_S 초 미만, 초당 말 단위가 MAX_RATE 초과
-    (5음절을 0.06초에 말할 수는 없음). 소리 크기·낱말 확률로 거르던 규칙(수정 1회차)은 작은 목소리와 짧은
-    대답을 버려서(감사 R6 재감사 G1) 없앴습니다.
+    1) 꼬리 창 불가능 속도 거르기(R6): 첫 창이 아니고 남은 소리가 TAIL_S 초 미만이며 초당 말 단위가 MAX_RATE 초과.
+    2) 대표 묵음 환각('Thank you.', '감사합니다.' 등) 반복 차단: 한 구간 내 반복 또는 같은 창에서 연속 반복.
+    3) 대표 묵음 환각 저음량 차단: 해당 구간의 원본 음량(32ms 창 90번째 백분위 RMS)이 HALLUC_QUIET_DB 미만.
     """
 
     def __init__(self, audio):
+        self.audio = audio
         self.dur = len(audio) / TARGET_SR
+        self._last_halluc: str | None = None
+
+    def _seg_dbfs(self, start: float, end: float) -> float:
+        i0 = max(0, int(round(start * TARGET_SR)))
+        i1 = min(len(self.audio), int(round(end * TARGET_SR)))
+        seg = self.audio[i0:i1]
+        if len(seg) == 0:
+            return -90.0
+        n = len(seg) // _HALLUC_FRAME * _HALLUC_FRAME
+        if n >= _HALLUC_FRAME:
+            fr = seg[:n].reshape(-1, _HALLUC_FRAME).astype(np.float64)
+            rms = float(np.percentile(np.sqrt((fr ** 2).mean(axis=1)), 90))
+        else:
+            rms = float(np.sqrt(np.mean(np.square(seg, dtype=np.float64))))
+        return max(-90.0, 20.0 * np.log10(rms + 1e-9))
 
     def reject(self, seg) -> bool:
+        # 1) 꼬리 창 불가능 속도 거르기
         win = float(getattr(seg, "seek", 0) or 0) * FRAME_S  # 이 글이 나온 30초 창의 시작(묶음 안 초)
-        if win <= 0 or self.dur - win >= TAIL_S:
+        if win > 0 and self.dur - win < TAIL_S:
+            units = len(_UNIT.findall(seg.text))
+            if units > 0 and units / max(float(seg.end) - float(seg.start), 1e-3) > MAX_RATE:
+                return True
+        # 2) 대표 묵음 환각 문구('Thank you.' / '감사합니다.' 등) 반복·저음량 차단
+        parts = _halluc_parts(seg.text)
+        if parts is None:
+            self._last_halluc = None
             return False
-        units = len(_UNIT.findall(seg.text))
-        return units > 0 and units / max(float(seg.end) - float(seg.start), 1e-3) > MAX_RATE
+        key = parts[0]
+        if len(parts) >= 2:  # 한 구간 안에 'Thank you. Thank you.' / '감사합니다. 감사합니다.' 반복
+            self._last_halluc = key
+            return True
+        if self._last_halluc == key:  # 연속 구간으로 같은 환각 문구 반복
+            return True
+        if self._seg_dbfs(float(seg.start), float(seg.end)) < HALLUC_QUIET_DB:
+            self._last_halluc = key
+            return True
+        self._last_halluc = key
+        return False
 
 
 class Transcriber:
@@ -168,7 +228,7 @@ class Transcriber:
             audio, language=language, beam_size=self.beam_size, vad_filter=False,
             condition_on_previous_text=self.prev_text, word_timestamps=words, hotwords=hot,
             without_timestamps=False, temperature=(0.0, 0.2, 0.4, 0.6),
-            log_prob_threshold=-1.0, no_speech_threshold=0.6, compression_ratio_threshold=2.4)
+            log_prob_threshold=-1.0, no_speech_threshold=NO_SPEECH_THRESHOLD, compression_ratio_threshold=2.4)
         return list(segs), info
 
     def transcribe_window(self, audio, offset: float, language: str | None, words: bool) -> list[Segment]:
@@ -190,8 +250,8 @@ class Transcriber:
             text = s.text.strip()
             if not text:
                 continue
-            # 말이 없는데 지어낸 듯한 구간 거르기(whisper 기본 기준과 같음)
-            if s.no_speech_prob > 0.6 and s.avg_logprob < -1.0:
+            # 말이 없는데 지어낸 듯한 구간 거르기
+            if s.no_speech_prob > NO_SPEECH_THRESHOLD and s.avg_logprob < -1.0:
                 continue
             if guard is not None and guard.reject(s):
                 self._dropped_now.append((offset + float(s.start), text))  # 글은 메모리에만(시험용), 기록에는 시각만
@@ -251,23 +311,36 @@ class Transcriber:
         return out
 
     def recheck_unsure(self, wav16k: Path, unsure: list, out: list, words: bool,
-                       cancel: Callable[[], bool] | None = None) -> list[Segment]:
+                       cancel: Callable[[], bool] | None = None,
+                       max_count: int = RECHECK_MAX_COUNT,
+                       max_seconds: float = RECHECK_MAX_SECONDS) -> list[Segment]:
         """판별이 '불확실'이라 이웃 언어로 정한 조각 가운데 글이 거의 나오지 않은 것(낱말이 조각의 절반 미만)만, 그 조각 하나를 언어
         자동으로 다시 봅니다(R6 수정 2회차). 영어 발언 사이의 1~1.5초 한국어가 영어 묶음에 들어가 글 없이
         빠지던 경우입니다. 자동 판별 결과가 처음 정한 언어와 다를 때만 받아들입니다(같으면 처음 결과 그대로 둠:
         한국어를 라틴 문자로, 영어를 한글로 적지 않기 위해).
+
+        긴 회의에서 시간이 과도하게 늘어나지 않도록 건수(max_count)·시간(max_seconds) 상한을 둡니다.
         """
         added: list[Segment] = []
         self.rechecked = getattr(self, "rechecked", 0)
+        checked_now = 0
+        t0 = time.monotonic()
         for a, b, lang in unsure:
             if cancel and cancel():
                 raise InterruptedError
-            covered = sum(max(0.0, min(w.end, b) - max(w.start, a)) for s in out for w in (s.words or [s]))
+            if checked_now >= max_count or (time.monotonic() - t0) >= max_seconds:
+                log.info("불확실 조각 다시 보기 상한 도달(%d건, %.1f초): 나머지 건너뜀",
+                         checked_now, time.monotonic() - t0)
+                break
+            covered = sum(max(0.0, min(w.end, b) - max(w.start, a))
+                          for s in out if s.end > a and s.start < b
+                          for w in (s.words or [s]))
             if covered >= 0.5 * (b - a):
                 continue  # 조각의 절반 이상이 낱말로 덮임(글이 나옴). 이웃 문장 첫 낱말이 걸친 정도는 다시 봄
             audio = read_segment(wav16k, a, b)
             if len(audio) < TARGET_SR * 0.2:
                 continue
+            checked_now += 1
             self.rechecked += 1
             # 먼저 언어만 봅니다(인코더 한 번). 처음 정한 언어와 같으면 다시 옮기지 않음(시간 절약)
             _, _, probs = self.model.detect_language(audio=audio)

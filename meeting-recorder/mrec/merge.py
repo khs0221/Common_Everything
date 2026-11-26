@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import bisect
 from dataclasses import asdict, dataclass
 
 from .diarize import Turn
@@ -48,13 +49,39 @@ def relabel_turns(turns: list[Turn]) -> list[tuple[float, float, str]]:
     return out
 
 
+class _TurnIndex:
+    """시작 시각순으로 정렬된 구간 목록의 이진 탐색 색인(긴 회의 성능 최적화)."""
+
+    def __init__(self, turns: list[tuple[float, float, str]]):
+        self.turns = turns
+        self.starts = [s for s, _, _ in turns]
+        max_ends: list[float] = []
+        mx = float("-inf")
+        for _, e, _ in turns:
+            if e > mx:
+                mx = e
+            max_ends.append(mx)
+        self.max_ends = max_ends
+
+    def overlapping(self, a: float, b: float) -> list[tuple[float, float, str]]:
+        """[a, b] 와 겹칠 가능성이 있는 후보 구간."""
+        lo = bisect.bisect_right(self.max_ends, a)
+        hi = bisect.bisect_left(self.starts, b)
+        return self.turns[lo:hi] if lo < hi else []
+
+    def within(self, mid: float, dist: float) -> list[tuple[float, float, str]]:
+        """mid 로부터 dist 이내일 가능성이 있는 후보 구간."""
+        lo = bisect.bisect_left(self.max_ends, mid - dist)
+        hi = bisect.bisect_right(self.starts, mid + dist)
+        return self.turns[lo:hi] if lo < hi else []
+
+
 def _speaker_at(a: float, b: float, turns: list[tuple[float, float, str]],
-                nearest_s: float = NEAREST_TURN_S) -> str | None:
+                nearest_s: float = NEAREST_TURN_S, index: _TurnIndex | None = None) -> str | None:
     """[a, b] 와 가장 많이 겹치는 화자. 안 겹치면 nearest_s 안의 가장 가까운 화자."""
+    idx = index if index is not None else _TurnIndex(turns)
     best, best_ov = None, 0.0
-    for s, e, spk in turns:
-        if s > b:
-            break
+    for s, e, spk in idx.overlapping(a, b):
         ov = min(b, e) - max(a, s)
         if ov > best_ov:
             best, best_ov = spk, ov
@@ -62,7 +89,7 @@ def _speaker_at(a: float, b: float, turns: list[tuple[float, float, str]],
         return best
     mid = (a + b) / 2
     nearest, dist = None, nearest_s
-    for s, e, spk in turns:
+    for s, e, spk in idx.within(mid, nearest_s):
         d = s - mid if mid < s else (mid - e if mid > e else 0.0)
         if d <= dist:
             nearest, dist = spk, d
@@ -137,17 +164,18 @@ def assign_loop_segments(segments: list[Segment], turns: list[Turn]) -> list[Utt
     if not lt:
         # 화자 분리 결과가 없으면(말이 아주 짧은 경우 등) 모두 참석자 1 로 봅니다.
         return join_utterances([Utterance(s.start, s.end, "spk1", s.text, s.lang, _seg_marked(s)) for s in segments])
+    idx = _TurnIndex(lt)
     pieces: list[Utterance] = []
     for seg in segments:  # 단어 시각이 없는 구간(드묾)은 구간 단위로
         if not any(w.text.strip() for w in seg.words):
-            spk = _speaker_at(seg.start, seg.end, lt, nearest_s=3.0) or UNKNOWN
+            spk = _speaker_at(seg.start, seg.end, lt, nearest_s=3.0, index=idx) or UNKNOWN
             pieces.append(Utterance(seg.start, seg.end, spk, seg.text, seg.lang, _seg_marked(seg)))
     for sent in _sentences(segments):
         words = [w for w, _ in sent]
         lang = sent[0][1]
-        labels: list[str | None] = [_speaker_at(w.start, w.end, lt) for w in words]
+        labels: list[str | None] = [_speaker_at(w.start, w.end, lt, index=idx) for w in words]
         if all(lab is None for lab in labels):
-            spk = _speaker_at(words[0].start, words[-1].end, lt, nearest_s=3.0) or UNKNOWN
+            spk = _speaker_at(words[0].start, words[-1].end, lt, nearest_s=3.0, index=idx) or UNKNOWN
             labels = [spk] * len(words)
         # 못 붙인 단어는 앞(없으면 뒤) 단어의 화자를 따릅니다.
         for i in range(1, len(labels)):
@@ -156,7 +184,7 @@ def assign_loop_segments(segments: list[Segment], turns: list[Turn]) -> list[Utt
         for i in range(len(labels) - 2, -1, -1):
             if labels[i] is None:
                 labels[i] = labels[i + 1]
-        major = _majority(words, labels, lt)
+        major = _majority(words, labels, lt, index=idx)
         runs = _runs(labels, words)
         split = any(lab != major and len(ws) >= MIN_SPLIT_WORDS and ws[-1].end - ws[0].start >= MIN_SPLIT_S
                     for lab, ws in runs)
@@ -171,11 +199,12 @@ def assign_loop_segments(segments: list[Segment], turns: list[Turn]) -> list[Utt
     return join_utterances(pieces)
 
 
-def _majority(words, labels, lt) -> str:
+def _majority(words, labels, lt, index: _TurnIndex | None = None) -> str:
     """문장 안에서 겹친 시간이 가장 긴 참석자."""
+    idx = index if index is not None else _TurnIndex(lt)
     score: dict[str, float] = {}
     for w, lab in zip(words, labels):
-        for s, e, spk in lt:
+        for s, e, spk in idx.overlapping(w.start, w.end):
             ov = min(w.end, e) - max(w.start, s)
             if ov > 0:
                 score[spk] = score.get(spk, 0.0) + ov
@@ -224,9 +253,10 @@ def join_utterances(utts: list[Utterance], gap: float = JOIN_GAP_S) -> list[Utte
                 and u.end - out[-1].start <= MAX_UTTERANCE_S
                 and len(out[-1].text) + 1 + len(u.text) <= MAX_UTTERANCE_CHARS):
             prev = out[-1]
+            old_text = prev.text
             prev.end = max(prev.end, u.end)
-            prev.text = f"{prev.text} {u.text}".strip()
-            prev.marked = f"{prev.marked or prev.text} {u.marked or u.text}".strip() if (prev.marked or u.marked) else ""
+            prev.text = f"{old_text} {u.text}".strip()
+            prev.marked = f"{prev.marked or old_text} {u.marked or u.text}".strip() if (prev.marked or u.marked) else ""
             prev.lang = prev.lang or u.lang
         else:
             out.append(Utterance(u.start, u.end, u.speaker, u.text, u.lang, u.marked))

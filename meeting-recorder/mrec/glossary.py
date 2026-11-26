@@ -12,10 +12,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 from pathlib import Path
 
 from . import models
-from .paths import app_dir
+from .paths import app_dir, user_glossary_dir
 
 log = logging.getLogger("mrec")
 
@@ -29,9 +30,35 @@ HOT_MAX_TOKENS = 120
 # 쓰지 않습니다. 이전 문장 이어받기(condition_on_previous_text)도 일관된 이득이 없어 끈 채로 둡니다.
 
 
+def bundled_glossary_dir() -> Path:
+    """프로그램과 함께 배포되는 기본 용어 폴더."""
+    return app_dir() / "glossary"
+
+
+def ensure_user_glossary(dst: Path | None = None, src: Path | None = None) -> Path:
+    """사용자 용어 폴더(%APPDATA%\\MeetingRecorder\\glossary)를 준비합니다.
+
+    폴더가 없을 때 최초 1회만 기본 용어 파일을 복사하고, 이미 있으면 업데이트 시에도 덮어쓰지 않습니다.
+    """
+    dst = dst or user_glossary_dir()
+    src = src or bundled_glossary_dir()
+    try:
+        if not dst.exists():
+            dst.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                for name in (HINT_FILE, FULL_FILE):
+                    sp = src / name
+                    if sp.is_file():
+                        shutil.copy2(sp, dst / name)
+        return dst
+    except OSError as e:
+        log.warning("사용자 용어 폴더를 만들지 못해 기본 폴더를 씁니다: %s", e)
+        return src
+
+
 def glossary_dir() -> Path:
     env = os.environ.get("MREC_GLOSSARY_DIR")
-    return Path(env) if env else app_dir() / "glossary"
+    return Path(env) if env else ensure_user_glossary()
 
 
 MAX_TERM_CHARS = 60  # 이보다 긴 항목은 용어가 아닌 문장으로 보고 건너뜀
@@ -78,23 +105,9 @@ def _decode(path: Path) -> str | None:
         raise Unreadable(path.name)
 
 
-def read_terms_stats(path: Path) -> tuple[list[str], dict]:
-    """용어 목록과 읽기 통계. 다른 도구가 만든 파일도 받아들이도록 관대하게 읽습니다.
-
-    - 한 줄에 용어 하나가 기본. 쉼표·세미콜론으로 나열된 줄은 나눔(숫자 사이 쉼표는 유지).
-    - 마침표·공백·& · / · - 는 용어의 일부로 둠(예: UN 38.3, Gage R&R, X-bar R chart).
-    - 줄 앞 글머리표(-, *, •, 1. 등)·앞뒤 공백·따옴표 제거, '용어 - 설명' / '용어: 설명' 은 앞 용어만.
-    - '#' 줄은 주석, 빈 줄 허용. UTF-8(BOM 포함)·CP949 를 읽음.
-    - 대소문자 무시 중복 제거(처음 표기 유지). MAX_TERM_CHARS 자를 넘는 항목은 건너뛰고 셈.
-    """
+def parse_terms_stats(text: str) -> tuple[list[str], dict]:
+    """문자열에서 용어 목록과 통계를 파싱합니다."""
     stats = {"terms": 0, "skipped_long": 0, "duplicates": 0, "unreadable": False}
-    try:
-        text = _decode(path)
-    except Unreadable:
-        stats["unreadable"] = True
-        return [], stats
-    if text is None:
-        return [], stats
     seen, out = set(), []
     for line in text.splitlines():
         line = line.strip()
@@ -117,6 +130,48 @@ def read_terms_stats(path: Path) -> tuple[list[str], dict]:
             seen.add(key)
             out.append(term)
     stats["terms"] = len(out)
+    return out, stats
+
+
+def parse_terms(text: str) -> list[str]:
+    """문자열(예: GUI '이번 회의 용어' 입력)에서 용어 목록을 추출합니다."""
+    return parse_terms_stats(text)[0] if text else []
+
+
+def merge_terms(priority: list[str], base: list[str]) -> list[str]:
+    """priority 용어를 최상단에 두고 base 용어를 이어 붙입니다(대소문자 무시 중복 제거)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for term in list(priority) + list(base):
+        t = " ".join(term.split()).strip()
+        if not t:
+            continue
+        key = t.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
+def read_terms_stats(path: Path) -> tuple[list[str], dict]:
+    """용어 목록과 읽기 통계. 다른 도구가 만든 파일도 받아들이도록 관대하게 읽습니다.
+
+    - 한 줄에 용어 하나가 기본. 쉼표·세미콜론으로 나열된 줄은 나눔(숫자 사이 쉼표는 유지).
+    - 마침표·공백·& · / · - 는 용어의 일부로 둠(예: UN 38.3, Gage R&R, X-bar R chart).
+    - 줄 앞 글머리표(-, *, •, 1. 등)·앞뒤 공백·따옴표 제거, '용어 - 설명' / '용어: 설명' 은 앞 용어만.
+    - '#' 줄은 주석, 빈 줄 허용. UTF-8(BOM 포함)·CP949 를 읽음.
+    - 대소문자 무시 중복 제거(처음 표기 유지). MAX_TERM_CHARS 자를 넘는 항목은 건너뛰고 셈.
+    """
+    stats = {"terms": 0, "skipped_long": 0, "duplicates": 0, "unreadable": False}
+    try:
+        text = _decode(path)
+    except Unreadable:
+        stats["unreadable"] = True
+        return [], stats
+    if text is None:
+        return [], stats
+    out, stats = parse_terms_stats(text)
     if stats["skipped_long"]:
         log.warning("용어 파일 %s: 너무 긴 줄 %d개를 건너뜀", path.name, stats["skipped_long"])
     return out, stats
@@ -152,10 +207,15 @@ def build_hotwords(terms: list[str], max_tokens: int = HOT_MAX_TOKENS, count=Non
     return ", ".join(used), len(used), len(terms) - len(used)
 
 
-def load_hints(directory: Path | None = None, max_tokens: int = HOT_MAX_TOKENS) -> dict:
-    """{'hotwords': 문자열, 'used': n, 'dropped': m, 'file': 이름} 또는 파일이 없거나 비면 {}."""
+def load_hints(directory: Path | None = None, max_tokens: int = HOT_MAX_TOKENS,
+               extra_terms: list[str] | None = None) -> dict:
+    """{'hotwords': 문자열, 'used': n, 'dropped': m, 'file': 이름} 또는 용어가 없으면 {}.
+
+    extra_terms('이번 회의 용어')가 있으면 파일 용어보다 앞에 두어 토큰 한도 안에서 우선 반영합니다.
+    """
     path = (directory or glossary_dir()) / HINT_FILE
-    terms, st = read_terms_stats(path)
+    file_terms, st = read_terms_stats(path)
+    terms = merge_terms(extra_terms, file_terms) if extra_terms else file_terms
     if not terms:
         return {}
     try:
@@ -168,7 +228,8 @@ def load_hints(directory: Path | None = None, max_tokens: int = HOT_MAX_TOKENS) 
     else:
         log.info("용어 힌트 %d개 사용", used)
     return {"hotwords": hot, "used": used, "dropped": dropped, "file": HINT_FILE, "read": len(terms),
-            "skipped_long": st["skipped_long"], "terms_text": ", ".join(terms[:used])}
+            "skipped_long": st["skipped_long"], "terms_text": ", ".join(terms[:used]),
+            "extra_count": len(extra_terms or [])}
 
 
 def load_full(directory: Path | None = None) -> list[str]:

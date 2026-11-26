@@ -184,23 +184,29 @@ def write_outputs(folder: Path, utts: list[Utterance], meta: dict, names: dict[s
     try:
         from . import glossary
 
-        terms = glossary.load_full()
+        base_terms = glossary.load_full()
     except Exception:
-        terms = []
+        base_terms = []
+    meeting_terms = list(meta.get("meeting_terms") or [])
+    if meeting_terms:
+        from . import glossary
+
+        all_terms = glossary.merge_terms(meeting_terms, base_terms)
+    else:
+        all_terms = base_terms
     paths = {"record": folder / RECORD_MD, "transcript": folder / TRANSCRIPT_TXT,
              "copilot": folder / COPILOT_TXT, "guide": folder / GUIDE_MD}
     # 메모장에서 한글이 깨지지 않게 UTF-8(BOM 포함)으로 씁니다(교정지침.md 는 BOM 없이).
     paths["record"].write_text(render_record_md(utts, meta, names), encoding="utf-8-sig")
     paths["transcript"].write_text(render_transcript_txt(utts, meta, names, marked), encoding="utf-8-sig")
-    paths["copilot"].write_text(render_copilot_txt(utts, meta, names, terms, marked), encoding="utf-8-sig")
-    guide = render_guide_md(terms, marked)
-    paths["guide"].write_text(guide, encoding="utf-8")
-    try:  # 프로그램 폴더의 glossary/교정지침.md 도 최신 용어로 다시 만듦(쓸 수 없으면 건너뜀)
+    paths["copilot"].write_text(render_copilot_txt(utts, meta, names, all_terms, marked), encoding="utf-8-sig")
+    paths["guide"].write_text(render_guide_md(all_terms, marked), encoding="utf-8")
+    try:  # 전역 glossary/교정지침.md 는 전역 용어(base_terms)만으로 갱신(이번 회의 용어는 섞지 않음)
         from . import glossary
 
         gdir = glossary.glossary_dir()
         if gdir.is_dir():
-            (gdir / GUIDE_MD).write_text(guide, encoding="utf-8")
+            (gdir / GUIDE_MD).write_text(render_guide_md(base_terms, marked), encoding="utf-8")
     except OSError:
         pass
     return paths
