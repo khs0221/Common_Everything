@@ -50,6 +50,8 @@ class LangPiece:
 class WhisperLangProbe:
     """faster-whisper 모델로 짧은 음성의 영어/한국어 확률을 구합니다(30초로 늘리지 않음)."""
 
+    MAX_BATCH = 16
+
     def __init__(self, whisper_model):
         import ctranslate2
 
@@ -57,13 +59,28 @@ class WhisperLangProbe:
         self.m = whisper_model  # faster_whisper.WhisperModel
 
     def __call__(self, audio: np.ndarray) -> tuple[float, float]:
-        feats = self.m.feature_extractor(audio)
-        if feats.shape[-1] < 10:
-            return 0.0, 0.0
-        sv = self._ct2.StorageView.from_array(np.ascontiguousarray(feats[None]))
-        enc = self.m.model.encode(sv)
-        probs = dict(self.m.model.detect_language(enc)[0])
-        return float(probs.get("<|en|>", 0.0)), float(probs.get("<|ko|>", 0.0))
+        return self.probe_batch([audio])[0]
+
+    def probe_batch(self, audios: list[np.ndarray]) -> list[tuple[float, float]]:
+        """길이가 정확히 같은 조각끼리만 묶어 배치 인코딩합니다(무음 패딩 없음 → 정확도 동일)."""
+        results: list[tuple[float, float]] = [(0.0, 0.0)] * len(audios)
+        groups: dict[int, list[tuple[int, np.ndarray]]] = {}
+        for idx, audio in enumerate(audios):
+            feats = self.m.feature_extractor(audio)
+            if feats.shape[-1] < 10:
+                continue
+            groups.setdefault(int(feats.shape[-1]), []).append((idx, feats))
+        for items in groups.values():
+            for start in range(0, len(items), self.MAX_BATCH):
+                chunk = items[start:start + self.MAX_BATCH]
+                batch = np.ascontiguousarray(np.stack([f for _, f in chunk], axis=0))
+                sv = self._ct2.StorageView.from_array(batch)
+                enc = self.m.model.encode(sv)
+                all_probs = self.m.model.detect_language(enc)
+                for (orig_idx, _), raw in zip(chunk, all_probs):
+                    probs = dict(raw)
+                    results[orig_idx] = (float(probs.get("<|en|>", 0.0)), float(probs.get("<|ko|>", 0.0)))
+        return results
 
 
 def _windows(start: float, end: float) -> list[tuple[float, float]]:
@@ -100,10 +117,13 @@ def split_segment(audio: np.ndarray, seg_start: float, seg_end: float,
                   probe: Callable[[np.ndarray], tuple[float, float]], conf: float | None = None) -> list[LangPiece]:
     """한 말소리 구간을 언어가 같은 조각들로 나눕니다(확실한 언어 전환이 있을 때만 나눔)."""
     wins = _windows(seg_start, seg_end)
+    chunks = [audio[int((a - seg_start) * TARGET_SR):int((b - seg_start) * TARGET_SR)] for a, b in wins]
+    if hasattr(probe, "probe_batch") and len(chunks) > 1:
+        probs_list = probe.probe_batch(chunks)
+    else:
+        probs_list = [probe(x) for x in chunks]
     labs = []
-    for a, b in wins:
-        x = audio[int((a - seg_start) * TARGET_SR):int((b - seg_start) * TARGET_SR)]
-        pe, pk = probe(x)
+    for (a, b), (pe, pk) in zip(wins, probs_list):
         lab, sure = _label(pe, pk, conf)
         labs.append((a, b, lab, pe, pk))
     sure_labs = [(a, b, lab) for a, b, lab, _, _ in labs if lab]

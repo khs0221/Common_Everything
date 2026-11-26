@@ -230,3 +230,33 @@ def prepare_16k_mono(src: Path | str, dst: Path | str) -> Path:
     finally:
         w.close()
     return Path(dst)
+
+
+def slice_to_16k_mono(src: Path | str, dst: Path | str, start_s: float, end_s: float) -> Path:
+    """원본 오디오의 [start_s, end_s] 구간만 16kHz 모노 WAV 로 추출합니다."""
+    import soundfile as sf
+
+    sr, _, frames = wav_info(src)
+    a = max(0, int(round(start_s * sr)))
+    b = min(frames, int(math.ceil(end_s * sr)))
+    rs = None if sr == TARGET_SR else Resampler(sr, TARGET_SR)
+    w = WavTrackWriter(dst, TARGET_SR, fsync_interval_s=60)
+    try:
+        if b > a:
+            with sf.SoundFile(str(src)) as f:
+                f.seek(a)
+                remain = b - a
+                step = sr * 10
+                while remain > 0:
+                    data = f.read(min(step, remain), dtype="float32", always_2d=True)
+                    if len(data) == 0:
+                        break
+                    mono = data.mean(axis=1) if data.shape[1] > 1 else data[:, 0]
+                    w.write(rs.process(mono) if rs is not None else mono)
+                    remain -= len(data)
+            if rs is not None:
+                w.write(rs.process(np.zeros(0, dtype=np.float32), final=True))
+    finally:
+        w.close()
+    return Path(dst)
+

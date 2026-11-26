@@ -60,3 +60,45 @@ def test_all_unsure_track_uses_probability_sum():
 def test_group_by_language_collects_far_apart_pieces():
     pieces = [LangPiece(0, 3, "ko", sure=True), LangPiece(4, 6, "en", sure=True), LangPiece(7, 9, "ko", sure=True)]
     assert langid.group_by_language(pieces) == [("en", [(4, 6)]), ("ko", [(0, 3), (7, 9)])]
+
+
+def test_whisper_lang_probe_batches_only_same_lengths():
+    """길이가 같은 3초 창만 배치로 묶고, 길이가 다른 짧은 창은 패딩 없이 따로 인코딩해야 합니다."""
+    from types import SimpleNamespace
+
+    encoded_shapes = []
+
+    class FakeModel:
+        def encode(self, sv):
+            arr = np.asarray(sv)
+            encoded_shapes.append(arr.shape)
+            return arr
+
+        def detect_language(self, enc):
+            # 각 항목의 평균값으로 en/ko 구분
+            out = []
+            for row in enc:
+                if float(row.mean()) > 0.5:
+                    out.append([("<|en|>", 0.9), ("<|ko|>", 0.1)])
+                else:
+                    out.append([("<|en|>", 0.1), ("<|ko|>", 0.9)])
+            return out
+
+    def fake_fe(audio):
+        frames = len(audio) // 160
+        val = 1.0 if float(audio[0]) > 0 else 0.0
+        return np.full((80, frames), val, dtype=np.float32)
+
+    fake_ct2 = SimpleNamespace(StorageView=SimpleNamespace(from_array=lambda a: a))
+    probe = langid.WhisperLangProbe.__new__(langid.WhisperLangProbe)
+    probe._ct2 = fake_ct2
+    probe.m = SimpleNamespace(feature_extractor=fake_fe, model=FakeModel())
+
+    a1 = np.full(SR * 3, 1.0, np.float32)    # 300 frames -> en
+    a2 = np.full(SR * 3, -1.0, np.float32)   # 300 frames -> ko
+    a3 = np.full(SR * 1, 1.0, np.float32)    # 100 frames -> en (별도 배치, 패딩 없음)
+    a4 = np.full(SR * 3, 1.0, np.float32)    # 300 frames -> en
+    res = probe.probe_batch([a1, a2, a3, a4])
+    assert res == [(0.9, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.1)]
+    assert sorted(encoded_shapes) == [(1, 80, 100), (3, 80, 300)]
+

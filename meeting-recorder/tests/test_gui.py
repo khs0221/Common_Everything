@@ -242,6 +242,9 @@ def test_gui_pause_resume_meeting_terms_mic_cut_and_12_speakers(tmp_path, monkey
         app.meeting_terms_var.set("ProjectX, 홍길동; BMS")
         assert app._meeting_terms() == ["ProjectX", "홍길동", "BMS"]
 
+        # 녹음 중 미리 전사는 기본 끔
+        assert app.bg_transcribe_var.get() is False
+
         # 녹음 시작 → 일시정지 → 재개 → 중지
         assert str(app.pause_btn["state"]) == "disabled"
         app.start_recording()
