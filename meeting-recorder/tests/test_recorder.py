@@ -311,3 +311,53 @@ def test_start_failure_after_open_stops_threads(tmp_path, monkeypatch):
     assert not rec.running and rec.tracks == {}
     assert len(made) == 2 and all(s._closed.is_set() for s in made)
     assert threading.active_count() <= before
+
+
+def test_pause_resume_excludes_paused_duration_and_keeps_alignment(tmp_path):
+    """일시정지 구간은 녹음 길이에서 제외되고, 재개 후에도 두 트랙 시간축이 맞아야 합니다."""
+    base = time.monotonic()
+    click_after = base + 1.9  # 0.6초 녹음 + 0.9초 일시정지 + 재개 후 0.4초 지점
+    mic_h, loop_h = [None], [None]
+
+    def mk_mic():
+        mic_h[0] = FakeSource(SR, _clicky(mic_h, [click_after]))
+        return mic_h[0]
+
+    def mk_loop():
+        loop_h[0] = FakeSource(SR, _clicky(loop_h, [click_after]))
+        return loop_h[0]
+
+    rec = Recorder(FakeBackend(mic=mk_mic, loop=mk_loop))
+    folder = rec.start(tmp_path, None, None)
+    time.sleep(0.6)
+    rec.pause()
+    assert rec.paused
+    el_paused = rec.elapsed()
+    time.sleep(0.9)
+    assert abs(rec.elapsed() - el_paused) < 0.02  # 일시정지 중 경과 시간 정지
+    assert all(v == -90.0 for v in rec.levels().values())
+    rec.resume()
+    assert not rec.paused
+    time.sleep(0.8)
+    res = rec.stop()
+    # 전체 벽시계 ~2.3초 중 0.9초 일시정지 제외 → 약 1.4초
+    assert 1.0 < res.seconds < 1.9, res.seconds
+    c_mic, len_mic = _first_click(res.mic_path)
+    c_loop, len_loop = _first_click(res.loop_path)
+    assert c_mic is not None and c_loop is not None
+    assert abs(c_mic - c_loop) < 0.15, (c_mic, c_loop)
+    assert abs(len_mic - len_loop) < 1e-3
+    info = json.loads((folder / INFO_FILE).read_text(encoding="utf-8"))
+    assert info["paused_seconds"] >= 0.8
+
+
+def test_stop_while_paused_excludes_paused_duration(tmp_path):
+    rec = Recorder(FakeBackend())
+    rec.start(tmp_path, None, None)
+    time.sleep(0.5)
+    rec.pause()
+    time.sleep(0.8)
+    res = rec.stop()
+    assert not rec.paused and not rec.running
+    assert res.seconds < 0.9, res.seconds
+

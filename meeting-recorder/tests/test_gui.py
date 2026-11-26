@@ -218,3 +218,63 @@ def test_gui_device_check_button(tmp_path, monkeypatch, tk_window):
             assert "열지 못함" in shown["warn"] and "mediafoundation.py:516" in app._err_report
             assert app.copy_btn.winfo_ismapped()
         assert str(app.check_btn["state"]) == "normal"
+
+
+def test_gui_pause_resume_meeting_terms_mic_cut_and_12_speakers(tmp_path, monkeypatch, tk_window):
+    """GUI 일시정지/재개 버튼, 이번 회의 용어, 마이크 소음 차단 선택, 상대방 인원 12명 확장."""
+    from mrec import gui
+    from mrec.devices import FakeBackend
+
+    app = _app(tk_window, tmp_path, monkeypatch, FakeBackend)
+    try:
+        # 상대방 인원 12명 확장
+        assert len(gui.SPK_CHOICES) == 13 and gui.SPK_CHOICES[-1] == ("12명", 12)
+        assert "12명" in app.spk_n_cb["values"]
+
+        # 마이크 소음 차단 기본 -40 dB, 선택 가능
+        assert app._mic_min_db() == -40.0
+        app.mic_cut_cb.current(0)
+        assert app._mic_min_db() is None
+        app.mic_cut_cb.current(3)
+        assert app._mic_min_db() == -30.0
+
+        # 이번 회의 용어 입력 칸
+        app.meeting_terms_var.set("ProjectX, 홍길동; BMS")
+        assert app._meeting_terms() == ["ProjectX", "홍길동", "BMS"]
+
+        # 녹음 시작 → 일시정지 → 재개 → 중지
+        assert str(app.pause_btn["state"]) == "disabled"
+        app.start_recording()
+        assert str(app.pause_btn["state"]) == "normal"
+        app.toggle_pause()
+        assert app.recorder.paused and "재개" in app.pause_btn.cget("text")
+        tk_window.update()
+        app.toggle_pause()
+        assert not app.recorder.paused and "일시정지" in app.pause_btn.cget("text")
+        app.stop_recording()
+        assert str(app.pause_btn["state"]) == "disabled"
+    finally:
+        if app.recorder is not None and app.recorder.running:
+            app.recorder.stop()
+
+
+def test_names_dialog_scrollable_for_many_speakers(tmp_path, tk_window):
+    """참석자가 많아도(12명+) NamesDialog 가 스크롤 가능해야 합니다."""
+    import tkinter as tk
+
+    from mrec import gui
+    from mrec.merge import ME, Utterance
+
+    utts = [Utterance(0.0, 1.0, ME, "hi")] + [
+        Utterance(i * 2.0, i * 2.0 + 1.0, f"spk{i}", f"speaker {i} line") for i in range(1, 13)
+    ]
+    status = tk.StringVar(value="")
+    dlg = gui.NamesDialog(tk_window, tmp_path, utts, {}, status)
+    try:
+        tk_window.update_idletasks()
+        assert len(dlg.entries) == 13
+        assert dlg.canvas is not None and dlg.scrollbar is not None
+        assert int(float(dlg.canvas.cget("height"))) <= gui.NamesDialog.MAX_BODY_HEIGHT
+    finally:
+        dlg.top.destroy()
+

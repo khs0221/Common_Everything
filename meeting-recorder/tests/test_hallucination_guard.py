@@ -83,3 +83,125 @@ def test_recheck_unsure_is_off_by_default():
     assert transcribe.RECHECK_UNSURE is False
     assert Job(Path("."), None, None).recheck_unsure is False
     assert getattr(_tr(), "recheck", transcribe.RECHECK_UNSURE) is False
+
+
+def test_no_speech_threshold_is_045(monkeypatch):
+    assert transcribe.NO_SPEECH_THRESHOLD == 0.45
+    tr = _tr()
+    segs = [_seg(0.0, 1.0, "정상", (0.9,), nsp=0.1, lp=-0.2),
+            _seg(1.0, 2.0, "잡음환각", (0.5,), nsp=0.5, lp=-1.2)]
+    monkeypatch.setattr(tr, "_run", lambda audio, lang, words, hints=True: (segs, NS(language="ko")), raising=False)
+    out = tr.transcribe_window(_speech(5.0), 0.0, "ko", True)
+    assert [s.text for s in out] == ["정상"]
+
+
+def test_repeated_and_low_volume_hallucination_phrases_rejected():
+    # 1) 한 구간 내 반복: 정상 음량이어도 차단
+    g = HallucinationGuard(_speech(10.0, level=0.1))
+    assert g.reject(_seg(0.0, 2.0, "Thank you. Thank you.", (0.9, 0.9, 0.9, 0.9)))
+    assert g.reject(_seg(2.0, 4.0, "감사합니다. 감사합니다.", (0.9, 0.9)))
+
+    # 2) 연속 구간 반복: 첫 번째 정상 음량은 통과, 두 번째 연속 반복은 차단
+    g2 = HallucinationGuard(_speech(10.0, level=0.1))
+    assert not g2.reject(_seg(0.0, 1.0, "Thank you.", (0.9, 0.9)))
+    assert g2.reject(_seg(1.0, 2.0, "Thank you.", (0.9, 0.9)))
+    # 정상 발언 뒤 다시 한 번은 허용
+    assert not g2.reject(_seg(2.0, 3.0, "Let's continue.", (0.9, 0.9)))
+    assert not g2.reject(_seg(3.0, 4.0, "감사합니다.", (0.9,)))
+    assert g2.reject(_seg(4.0, 5.0, "감사합니다.", (0.9,)))
+
+    # 3) 저음량(묵음/배경소음 -50 dB)에서는 단일 'Thank you.' / '감사합니다.' 도 차단
+    quiet = _speech(10.0, level=0.003)  # 약 -50 dBFS
+    g3 = HallucinationGuard(quiet)
+    assert g3.reject(_seg(0.0, 1.0, "Thank you.", (0.9, 0.9)))
+    assert g3.reject(_seg(2.0, 3.0, "감사합니다.", (0.9,)))
+
+    # 4) 작은 목소리(-38 dB)로 실제 말한 단일 'Thank you.' 는 통과
+    soft = _speech(5.0, level=0.0125)  # 약 -38 dBFS
+    assert not HallucinationGuard(soft).reject(_seg(0.0, 1.0, "Thank you.", (0.9, 0.9)))
+
+
+def test_recheck_unsure_enforces_count_and_time_caps(tmp_path):
+    import soundfile as sf
+
+    wav = tmp_path / "t.wav"
+    sf.write(wav, np.zeros(SR * 30, dtype=np.float32), SR)
+    calls = {"n": 0}
+
+    class FakeModel:
+        def detect_language(self, audio):
+            calls["n"] += 1
+            return "en", 0.9, [("en", 0.9), ("ko", 0.1)]
+
+    tr = _tr()
+    tr.model = FakeModel()
+    unsure = [(i * 0.5, i * 0.5 + 0.4, "en") for i in range(40)]
+
+    tr.recheck_unsure(wav, unsure, [], True, max_count=5, max_seconds=60.0)
+    assert calls["n"] == 5
+
+    calls["n"] = 0
+    tr.recheck_unsure(wav, unsure, [], True, max_count=30, max_seconds=0.0)
+    assert calls["n"] == 0
+
+
+def test_vad_min_db_and_background_noise_gain_guard(tmp_path):
+    import soundfile as sf
+
+    from mrec import vad
+
+    rng = np.random.default_rng(42)
+    # 1) 일정한 배경 소음(-50 dB 및 -35 dB): 마이크 보호 시 증폭 금지(배율 1.0), -50 dB는 min_db=-40 컷으로 제외
+    steady = (0.003 * rng.normal(size=SR * 3)).astype(np.float32)
+    w_steady = tmp_path / "steady.wav"
+    sf.write(w_steady, steady, SR)
+    assert vad.track_gain(w_steady, min_db=-40.0) == 1.0
+    assert vad.filter_quiet_segments(w_steady, [(0.2, 2.0)], -40.0) == []
+    assert vad.filter_quiet_segments(w_steady, [(0.2, 2.0)], None) == [(0.2, 2.0)]
+
+    fan = (0.018 * rng.normal(size=SR * 3)).astype(np.float32)  # 약 -35 dB 일정한 팬 소음
+    w_fan = tmp_path / "fan.wav"
+    sf.write(w_fan, fan, SR)
+    assert vad.track_gain(w_fan, min_db=-40.0) == 1.0
+
+    # 2) 조용한 바닥(-66 dB) + 작은 말소리(-30 dB): 증폭 허용, -40 dB 컷 통과
+    mixed = (0.0005 * rng.normal(size=SR * 4)).astype(np.float32)
+    mixed[SR:SR * 2] = (0.03 * rng.normal(size=SR)).astype(np.float32)
+    w_mixed = tmp_path / "mixed.wav"
+    sf.write(w_mixed, mixed, SR)
+    assert vad.track_gain(w_mixed, min_db=-40.0) > 1.0
+    assert vad.filter_quiet_segments(w_mixed, [(0.0, 0.8), (1.0, 2.0)], -40.0) == [(1.0, 2.0)]
+
+
+def test_pipeline_skips_diarization_for_one_on_one(tmp_path, monkeypatch):
+    """1:1 회의(num_speakers=1)는 화자 분리를 생략하고 상대방 발언을 spk1 로 처리합니다."""
+    import soundfile as sf
+
+    from mrec import diarize, pipeline, vad
+
+    folder = tmp_path / "meet"
+    folder.mkdir()
+    wav = folder / "loop.wav"
+    sf.write(wav, (0.05 * np.sin(2 * np.pi * 440 * np.arange(SR * 2) / SR)).astype(np.float32), SR)
+
+    monkeypatch.setenv("MREC_GLOSSARY_DIR", str(tmp_path / "g"))
+    (tmp_path / "g").mkdir()
+    monkeypatch.setattr(vad, "speech_segments", lambda *a, **k: [(0.0, 1.5)])
+
+    def fail_diarize(*a, **k):
+        raise AssertionError("1:1 회의에서는 화자 분리를 호출하지 않아야 합니다")
+
+    monkeypatch.setattr(diarize, "diarize_file", fail_diarize)
+
+    class FakeTr:
+        def __init__(self, *a, **k):
+            self.dropped = []
+
+        def transcribe_file(self, *a, **k):
+            return [transcribe.Segment(0.0, 1.5, "Hello", "en", [transcribe.Word(0.0, 1.5, " Hello", 0.9)])]
+
+    monkeypatch.setattr(transcribe, "Transcriber", FakeTr)
+    res = pipeline.run(pipeline.Job(folder, None, wav, language="en", num_speakers=1, extra_terms=["ProjAlpha"]))
+    assert res.speakers == ["spk1"]
+    assert "ProjAlpha" in (folder / "Copilot용.txt").read_text(encoding="utf-8-sig")
+

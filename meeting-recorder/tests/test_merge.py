@@ -124,3 +124,45 @@ def test_mark_low_conf_words_and_join():
     seg = Segment(0, 3, "The CPK is", "en", ws)
     u = mic_utterances([seg])[0]
     assert u.text == "The CPK is" and u.marked == "The CPK(?) is"
+
+
+def test_join_utterances_marked_does_not_duplicate_text():
+    """prev.marked 가 비어 있고 u.marked 가 있을 때 u.text 가 중복되지 않아야 합니다."""
+    utts = [
+        Utterance(0.0, 1.0, "spk1", "hello", "en", ""),
+        Utterance(1.2, 2.0, "spk1", "world", "en", "world(?)"),
+    ]
+    out = join_utterances(utts)
+    assert len(out) == 1
+    assert out[0].text == "hello world"
+    assert out[0].marked == "hello world(?)"
+
+    utts2 = [
+        Utterance(0.0, 1.0, "spk1", "hello", "en", "hello(?)"),
+        Utterance(1.2, 2.0, "spk1", "world", "en", ""),
+    ]
+    out2 = join_utterances(utts2)
+    assert out2[0].text == "hello world"
+    assert out2[0].marked == "hello(?) world"
+
+
+def test_binary_search_speaker_assignment_scales_and_matches():
+    """긴 회의(수천 개 구간·단어)에서도 이진 탐색으로 정확하고 빠르게 화자를 붙입니다."""
+    import time
+
+    n_turns = 1500
+    turns = [Turn(i * 4.0, i * 4.0 + 3.5, i % 4) for i in range(n_turns)]
+    segs = [
+        Segment(i * 4.0, i * 4.0 + 3.0, f"word{i} ok.", "en",
+                words((i * 4.0 + 0.2, i * 4.0 + 1.0, f" word{i}"),
+                      (i * 4.0 + 1.1, i * 4.0 + 2.0, " ok.")))
+        for i in range(n_turns)
+    ]
+    t0 = time.monotonic()
+    out = assign_loop_segments(segs, turns)
+    elapsed = time.monotonic() - t0
+    assert len(out) == n_turns
+    assert [u.speaker for u in out[:4]] == ["spk1", "spk2", "spk3", "spk4"]
+    assert out[-1].speaker == f"spk{((n_turns - 1) % 4) + 1}"
+    assert elapsed < 2.0, elapsed
+

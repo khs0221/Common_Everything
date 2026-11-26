@@ -36,10 +36,18 @@ def default_output_dir() -> Path:
     return (docs if docs.is_dir() else Path.home()) / "회의기록"
 
 
-def settings_path() -> Path:
+def user_data_dir() -> Path:
     base = os.environ.get("APPDATA")
     root = Path(base) if base else Path.home() / ".config"
-    return root / APP_NAME / "settings.json"
+    return root / APP_NAME
+
+
+def settings_path() -> Path:
+    return user_data_dir() / "settings.json"
+
+
+def user_glossary_dir() -> Path:
+    return user_data_dir() / "glossary"
 
 
 def load_settings() -> dict:

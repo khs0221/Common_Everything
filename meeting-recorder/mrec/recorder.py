@@ -70,12 +70,16 @@ class AlignedTrack:
 
     def __init__(self, name: str, opener: Callable[[], Source], clock: Callable[[], float],
                  stop: threading.Event, default_probe: Callable[[], str | None] | None = None,
-                 path: Path | None = None, t0: float | None = None, samplerate: int | None = None):
+                 path: Path | None = None, t0: float | None = None, samplerate: int | None = None,
+                 paused: Callable[[], bool] | None = None,
+                 effective_clock: Callable[[float], float] | None = None):
         self.name = name
         self.opener = opener
         self.clock = clock
         self.stop_event = stop
         self.default_probe = default_probe  # None 이면 고른 장치에 고정
+        self._is_paused = paused or (lambda: False)
+        self._eff_clock = effective_clock or (lambda t: t)
         self.source: Source | None = None
         self.device_name: str | None = None
         self.open_combo: str | None = None
@@ -173,7 +177,7 @@ class AlignedTrack:
         self.open_combo = getattr(src, "combo", None)  # 어떤 방법으로 열렸는지(진단, R5)
         if self.started_at is None:
             self.started_at = started
-        self._q.put(("sync", started))
+        self._q.put(("sync", self._eff_clock(started)))
         self.state = "ok"
 
     def _close_source(self) -> None:
@@ -222,11 +226,13 @@ class AlignedTrack:
                         break
                     continue
                 now = self.clock()
-                if block.size:
+                if self._is_paused():
+                    self.level = -90.0
+                elif block.size:
                     if self._rs is not None:
                         block = self._rs.process(block)
                     self.level = level_dbfs(block)
-                    self._q.put(("data", block, now))  # 중지 직후 도착한 조각도 씁니다
+                    self._q.put(("data", block, self._eff_clock(now)))  # 중지 직후 도착한 조각도 씁니다
                 if self.default_probe and now - last_probe >= DEFAULT_PROBE_S:
                     last_probe = now
                     try:
@@ -323,18 +329,39 @@ class Recorder:
         self._stop = threading.Event()
         self.running = False
         self.started_at: datetime | None = None
+        self._pause_lock = threading.Lock()
+        self.paused = False
+        self._pause_started: float | None = None
+        self._paused_total = 0.0
+
+    def _is_paused(self) -> bool:
+        return self.paused
+
+    def _effective_now(self, now: float | None = None) -> float:
+        """일시정지된 누적 시간을 뺀 유효 시각(초)."""
+        with self._pause_lock:
+            t = self.clock() if now is None else now
+            if self.paused and self._pause_started is not None:
+                return min(t, self._pause_started) - self._paused_total
+            return t - self._paused_total
 
     def start(self, output_root: Path, mic_id: str | None, speaker_id: str | None) -> Path:
         if self.running:
             raise RuntimeError("이미 녹음 중입니다")
         output_root.mkdir(parents=True, exist_ok=True)
         self._stop = threading.Event()
+        with self._pause_lock:
+            self.paused = False
+            self._pause_started = None
+            self._paused_total = 0.0
         b = self.backend
         probe_mic = getattr(b, "default_microphone_id", None) if mic_id is None else None
         probe_spk = getattr(b, "default_speaker_id", None) if speaker_id is None else None
         self.tracks = {
-            "mic": AlignedTrack("mic", lambda: b.open_microphone(mic_id), self.clock, self._stop, probe_mic),
-            "loop": AlignedTrack("loop", lambda: b.open_loopback(speaker_id), self.clock, self._stop, probe_spk),
+            "mic": AlignedTrack("mic", lambda: b.open_microphone(mic_id), self.clock, self._stop, probe_mic,
+                                paused=self._is_paused, effective_clock=self._effective_now),
+            "loop": AlignedTrack("loop", lambda: b.open_loopback(speaker_id), self.clock, self._stop, probe_spk,
+                                 paused=self._is_paused, effective_clock=self._effective_now),
         }
         # 1) 두 장치를 각자의 녹음 스레드에서 엽니다(읽기도 곧바로 시작해 버퍼가 넘치지 않게).
         for t in self.tracks.values():
@@ -368,6 +395,35 @@ class Recorder:
         self.running = True
         return self.folder
 
+    def pause(self) -> None:
+        """녹음을 일시정지합니다. 장치는 계속 읽어 버퍼 넘침을 막되 파일에는 쓰지 않습니다."""
+        if not self.running:
+            raise RuntimeError("녹음 중이 아닙니다")
+        with self._pause_lock:
+            if self.paused:
+                return
+            self.paused = True
+            self._pause_started = self.clock()
+        for t in self.tracks.values():
+            t.level = -90.0
+
+    def resume(self) -> None:
+        """일시정지된 녹음을 재개합니다. 일시정지 구간은 녹음 길이에서 제외하고 시간축을 유지합니다."""
+        if not self.running:
+            raise RuntimeError("녹음 중이 아닙니다")
+        with self._pause_lock:
+            if not self.paused:
+                return
+            now = self.clock()
+            if self._pause_started is not None:
+                self._paused_total += max(0.0, now - self._pause_started)
+            self._pause_started = None
+            resume_eff = now - self._paused_total
+            self.paused = False
+        # 일시정지 경계에서 트랙마다 1조각 차이로 벌어지지 않게 재개 시각 위치로 두 트랙을 맞춥니다.
+        for t in self.tracks.values():
+            t._q.put(("sync", resume_eff))
+
     def _abort_start(self) -> None:
         self._stop.set()
         for t in self.tracks.values():
@@ -383,6 +439,7 @@ class Recorder:
         self._remove_partial_folder()
         self.tracks = {}
         self.running = False
+        self.paused = False
 
     def _remove_partial_folder(self) -> None:
         """시작 실패로 남은 빈 회의 폴더와, 소리 없이 머리말만 있는 우리 파일만 지웁니다(감사 E3).
@@ -407,7 +464,7 @@ class Recorder:
             pass
 
     def elapsed(self) -> float:
-        return self.clock() - self.t0 if self.running else 0.0
+        return max(0.0, self._effective_now() - self.t0) if self.running else 0.0
 
     def levels(self) -> dict[str, float]:
         return {k: t.level for k, t in self.tracks.items()}
@@ -436,7 +493,14 @@ class Recorder:
     def stop(self, join_timeout: float = STOP_JOIN_S) -> RecordingResult:
         if not self.running:
             raise RuntimeError("녹음 중이 아닙니다")
-        end = self.clock() - self.t0
+        with self._pause_lock:
+            now = self.clock()
+            if self.paused and self._pause_started is not None:
+                end = max(0.0, self._pause_started - self._paused_total - self.t0)
+                self._paused_total += max(0.0, now - self._pause_started)
+                self._pause_started = None
+            else:
+                end = max(0.0, now - self._paused_total - self.t0)
         self._stop.set()
         # 장치는 각 녹음 스레드가 스스로 닫습니다(읽는 도중 다른 스레드에서 닫지 않음).
         for t in self.tracks.values():
@@ -454,6 +518,7 @@ class Recorder:
                 t.close()
             except OSError as e:
                 t.stats.error = t.stats.error or f"파일 닫기 오류: {e}"
+        self.paused = False
         self.running = False
         self._write_info(finished=True, seconds=longest)
         assert self.folder is not None
@@ -467,6 +532,7 @@ class Recorder:
             "started_at": self.started_at.isoformat(timespec="seconds") if self.started_at else None,
             "finished": finished,
             "seconds": round(seconds, 3) if seconds is not None else None,
+            "paused_seconds": round(self._paused_total, 3),
             "files": {"mic": MIC_FILE, "loop": LOOP_FILE},
             "tracks": {k: vars(t.stats) for k, t in self.tracks.items()},
         }

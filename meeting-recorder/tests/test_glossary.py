@@ -176,3 +176,73 @@ def test_hint_echo_catches_list_without_commas_and_short_insertions():
     assert t.short_hint_only(seg(" MSA SPC", 0.1, -1.2))          # 확신 낮은 2단어
     assert not t.short_hint_only(seg(" Cpk.", 0.05, -0.2))        # 또렷하게 말한 용어
     assert not t.short_hint_only(seg(" Thank you.", 0.9, -1.5))   # 용어가 아님(힌트와 무관)
+
+
+def test_user_glossary_copied_once_and_not_overwritten(tmp_path, monkeypatch):
+    """사용자 용어 폴더(%APPDATA%\\MeetingRecorder\\glossary)는 최초 1회만 복사하고 업데이트 시 덮어쓰지 않음."""
+    monkeypatch.delenv("MREC_GLOSSARY_DIR", raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    bundled = tmp_path / "bundled_glossary"
+    bundled.mkdir()
+    (bundled / glossary.HINT_FILE).write_text("DefaultHint\n", encoding="utf-8")
+    (bundled / glossary.FULL_FILE).write_text("DefaultFull\n", encoding="utf-8")
+    monkeypatch.setattr(glossary, "bundled_glossary_dir", lambda: bundled)
+
+    # 1회차: 기본 파일 복사
+    udir = glossary.glossary_dir()
+    assert udir == tmp_path / "appdata" / "MeetingRecorder" / "glossary"
+    assert glossary.read_terms(udir / glossary.HINT_FILE) == ["DefaultHint"]
+    assert glossary.read_terms(udir / glossary.FULL_FILE) == ["DefaultFull"]
+
+    # 사용자가 수정 + 프로그램 업데이트로 기본 파일이 바뀜
+    (udir / glossary.HINT_FILE).write_text("UserCustomHint\n", encoding="utf-8")
+    (udir / glossary.FULL_FILE).write_text("UserCustomFull\n", encoding="utf-8")
+    (bundled / glossary.HINT_FILE).write_text("UpdatedDefaultHint\n", encoding="utf-8")
+    (bundled / glossary.FULL_FILE).write_text("UpdatedDefaultFull\n", encoding="utf-8")
+
+    # 2회차: 사용자 파일이 덮어쓰이지 않아야 함
+    udir2 = glossary.glossary_dir()
+    assert udir2 == udir
+    assert glossary.read_terms(udir2 / glossary.HINT_FILE) == ["UserCustomHint"]
+    assert glossary.read_terms(udir2 / glossary.FULL_FILE) == ["UserCustomFull"]
+
+
+def test_meeting_terms_priority_and_global_guide_isolation(tmp_path, monkeypatch):
+    """'이번 회의 용어'는 인식 힌트와 회의별 교정지침.md·Copilot용.txt 최상단에 우선 반영, 전역 교정지침.md 에는 섞지 않음."""
+    gdir = tmp_path / "glossary"
+    gdir.mkdir()
+    (gdir / glossary.HINT_FILE).write_text("GlobalHint\nCommonTerm\n", encoding="utf-8")
+    (gdir / glossary.FULL_FILE).write_text("GlobalFull\nCommonTerm\n", encoding="utf-8")
+    monkeypatch.setenv("MREC_GLOSSARY_DIR", str(gdir))
+    # 토크나이저 파일 없이도 동작하도록 토큰 수 계산만 가짜로 대체
+    monkeypatch.setattr(glossary, "_count_tokens", lambda s: len(s.split()))
+
+    extra = glossary.parse_terms("ProjectX, commonterm; 홍길동")
+    assert extra == ["ProjectX", "commonterm", "홍길동"]
+
+    h = glossary.load_hints(gdir, extra_terms=extra)
+    assert h["hotwords"].startswith("ProjectX, commonterm, 홍길동, GlobalHint")
+    assert h["used"] == 4  # CommonTerm 은 대소문자 무시 중복 제거
+
+    meet = tmp_path / "meet"
+    meet.mkdir()
+    utts = [Utterance(0, 1, ME, "hello", "en"), Utterance(2, 3, "spk1", "hi", "en")]
+    meta = {"seconds": 3, "language": "auto", "meeting_terms": extra}
+    outs = output.write_outputs(meet, utts, meta)
+
+    meet_guide = outs["guide"].read_text(encoding="utf-8")
+    meet_cop = outs["copilot"].read_text(encoding="utf-8-sig")
+    global_guide = (gdir / output.GUIDE_MD).read_text(encoding="utf-8")
+
+    # 회의별 교정지침.md·Copilot용.txt 최상단에 우선 반영
+    assert meet_guide.index("- ProjectX") < meet_guide.index("- GlobalFull")
+    assert meet_cop.index("ProjectX") < meet_cop.index("GlobalFull")
+    # 전역 교정지침.md 에는 섞이지 않음
+    assert "ProjectX" not in global_guide and "홍길동" not in global_guide
+    assert "- GlobalFull" in global_guide
+
+    # 이름 변경 후 다시 쓸 때도 회의별 용어 유지 + 전역 격리 유지
+    output.apply_names(meet, {"spk1": "Alice"})
+    assert "ProjectX" in (meet / output.COPILOT_TXT).read_text(encoding="utf-8-sig")
+    assert "ProjectX" not in (gdir / output.GUIDE_MD).read_text(encoding="utf-8")
+
