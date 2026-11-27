@@ -6,7 +6,8 @@ Google Colab에서 한국 배당성장주 전략을 **백테스트(장기보유 
 |---|---|---|---|
 | `notebooks/colab_backtest.ipynb` | **과거 백테스트(2019-04~) + 장기보유 매도규칙 + 5개 필터 분해 + PDF 리포트** | **불필요** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_backtest.ipynb) |
 | `notebooks/colab_screener.ipynb` | **매년 4~5월 전 종목 스크리너 · 보유주 정기 검진 · 매수 배분 + PDF 리포트** *(개인 보유/시트는 비공개 전용)* | **무료 `DART_API_KEY`** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_screener.ipynb) |
-| `notebooks/colab_alpha_lab.ipynb` | **알파 팩터 연구실 · 과적합 차단 4중 검증(Walk-Forward · IC · 몬테카를로 500회) + 이어받기** | **불필요** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_alpha_lab.ipynb) |
+| `notebooks/colab_alpha_lab.ipynb` | **알파 팩터 연구실 · 과적합 차단 4중 검증(Walk-Forward · IC · 몬테카를로 500회 · PIT 시총 필터)** | **불필요** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_alpha_lab.ipynb) |
+| `notebooks/colab_pit_builder.ipynb` | **전 종목(~2,300개사) 풀 유니버스 PIT DB 빌더** *(Drive 자동 저장 · 2일 이어받기 -> `colab_alpha_lab` 자동 연동)* | **무료 `DART_API_KEY`** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_pit_builder.ipynb) |
 
 > *(참고: PR이 기본 브랜치로 머지된 뒤에는 위 Colab 배지 링크의 브랜치명만 기본 브랜치로 바꾸면 됩니다.)*
 
@@ -26,7 +27,8 @@ dividend-backtest/
 └── notebooks/
     ├── colab_backtest.ipynb           # 백테스트(장기보유·리밸런싱·Ablation) · PDF/HTML 리포트
     ├── colab_screener.ipynb           # 매년 4~5월 전 종목 스크리닝 · 보유주 검진 · 매수 배분 · PDF/HTML 리포트
-    └── colab_alpha_lab.ipynb          # 알파 팩터 연구실(Walk-Forward 전진검증 · 몬테카를로 · Drive 이어받기)
+    ├── colab_alpha_lab.ipynb          # 알파 팩터 연구실(Walk-Forward 전진검증 · 몬테카를로 · PIT 시총 필터)
+    └── colab_pit_builder.ipynb        # 코스피·코스닥 전체 보통주(~2,300개사) 풀 유니버스 PIT DB 빌더
 ```
 
 ---
