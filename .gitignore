@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+
+# Jupyter / Colab cache
+.ipynb_checkpoints/
+_cache_dividend_backtest/
+
+# Secrets & local env (Public repo safety)
+.env
+.env.*
+*.pem
+*.key
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
