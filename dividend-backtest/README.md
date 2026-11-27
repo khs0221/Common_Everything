@@ -1,8 +1,11 @@
 # 한국 배당성장주 백테스트 연구소 (`dividend-backtest`)
 
-Google Colab에서 **API 키나 외부 인증 없이 `모두 실행` 한 번**으로 한국 배당성장주 전략을 백테스트하고 시각화하는 독립 실행 프로젝트입니다.
+Google Colab에서 한국 배당성장주 전략을 **백테스트(Ablation 포함)**하고, **코스피·코스닥 전 종목 통합 스크리닝 + 모바일/PC HTML 리포트 다운로드**까지 수행하는 독립 실행 프로젝트입니다.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_backtest.ipynb)
+| 노트북 | 목적 | API 키 | Colab 바로 열기 |
+|---|---|---|---|
+| `notebooks/colab_backtest.ipynb` | **과거 백테스트 + 개별 필터 분해(Ablation) + HTML 리포트** (374개사 PIT DART + 일별 시세) | **불필요** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_backtest.ipynb) |
+| `notebooks/colab_screener.ipynb` | **코스피·코스닥 전 종목 최신 스크리너 + HTML 리포트** (1차 시총/배당 → 2차 1~9번 + 보완 필터 토글) | **무료 `DART_API_KEY`** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_screener.ipynb) |
 
 > *(참고: PR이 기본 브랜치로 머지된 뒤에는 위 Colab 배지 링크의 브랜치명만 기본 브랜치로 바꾸면 됩니다.)*
 
@@ -20,7 +23,8 @@ dividend-backtest/
 │   ├── kr_treasury_10y_annual.csv     # 한국 국고채 10년물 연평균 금리 (2013~2025, 한국은행 ECOS)
 │   └── kospi_snapshots.json           # KOSPI 연말·3월말 스냅샷 (오프라인 폴백 참고용)
 └── notebooks/
-    └── colab_backtest.ipynb           # Google Colab 독립 실행 백테스트·시각화 노트북
+    ├── colab_backtest.ipynb           # 백테스트 · 개별 필터 분해(Ablation) · HTML 리포트 다운로드
+    └── colab_screener.ipynb           # 코스피·코스닥 전 종목 최신 스크리너 · HTML 리포트 다운로드
 ```
 
 ---

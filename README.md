@@ -10,7 +10,7 @@
 |---|---|---|---|
 | [`ai-coding-curriculum/`](ai-coding-curriculum/) | 비전공자·입문자용 AI 코딩 학습 커리큘럼 (레벨 1~9, 치트시트, 용어사전) | Markdown 학습서 | [README](ai-coding-curriculum/README.md) |
 | [`meeting-recorder/`](meeting-recorder/) | 오프라인 화상회의 녹음·전사·화자분리 데스크톱 프로그램 | Python, Whisper, Windows exe 빌드(GitHub Actions) | [README](meeting-recorder/README.md) |
-| [`dividend-backtest/`](dividend-backtest/) | 한국 배당성장주 전략 검증 및 Google Colab 독립 백테스트 연구소 | Python, Jupyter/Colab, 공개 DART·일별 시세 | [README](dividend-backtest/README.md) · [Colab 열기](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_backtest.ipynb) |
+| [`dividend-backtest/`](dividend-backtest/) | 한국 배당성장주 백테스트(Ablation) · 전 종목 스크리너 · HTML 리포트 | Python, Google Colab, OpenDART · 네이버 시세 | [README](dividend-backtest/README.md) · [백테스트 Colab](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_backtest.ipynb) · [전종목 스크리너 Colab](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_screener.ipynb) |
 
 ---
 
