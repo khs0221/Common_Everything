@@ -5,7 +5,8 @@ Google Colab에서 한국 배당성장주 전략을 **백테스트(장기보유 
 | 노트북 | 목적 | API 키 | Colab 바로 열기 |
 |---|---|---|---|
 | `notebooks/colab_backtest.ipynb` | **과거 백테스트(2019-04~) + 장기보유 매도규칙 + 5개 필터 분해 + PDF 리포트** | **불필요** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_backtest.ipynb) |
-| `notebooks/colab_screener.ipynb` | **매년 4~5월 전 종목 스크리너 · 보유주 정기 검진 · 매수 배분 + PDF 리포트** *(개인 보유 YAML은 비공개 Drive 전용)* | **무료 `DART_API_KEY`** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_screener.ipynb) |
+| `notebooks/colab_screener.ipynb` | **매년 4~5월 전 종목 스크리너 · 보유주 정기 검진 · 매수 배분 + PDF 리포트** *(개인 보유/시트는 비공개 전용)* | **무료 `DART_API_KEY`** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_screener.ipynb) |
+| `notebooks/colab_alpha_lab.ipynb` | **알파 팩터 연구실 · 과적합 차단 4중 검증(Walk-Forward · IC · 몬테카를로 500회) + 이어받기** | **불필요** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_alpha_lab.ipynb) |
 
 > *(참고: PR이 기본 브랜치로 머지된 뒤에는 위 Colab 배지 링크의 브랜치명만 기본 브랜치로 바꾸면 됩니다.)*
 
@@ -24,7 +25,8 @@ dividend-backtest/
 │   └── kospi_snapshots.json           # KOSPI 연말·3월말 스냅샷 (오프라인 폴백 참고용)
 └── notebooks/
     ├── colab_backtest.ipynb           # 백테스트(장기보유·리밸런싱·Ablation) · PDF/HTML 리포트
-    └── colab_screener.ipynb           # 매년 4~5월 전 종목 스크리닝 · 보유주 검진 · 매수 배분 · PDF/HTML 리포트
+    ├── colab_screener.ipynb           # 매년 4~5월 전 종목 스크리닝 · 보유주 검진 · 매수 배분 · PDF/HTML 리포트
+    └── colab_alpha_lab.ipynb          # 알파 팩터 연구실(Walk-Forward 전진검증 · 몬테카를로 · Drive 이어받기)
 ```
 
 ---
