@@ -25,7 +25,8 @@ Google Colab에서 한국 배당성장주 전략을 **백테스트(장기보유 
 dividend-backtest/
 ├── README.md                                  # 프로젝트 안내 및 실행 방법
 ├── docs/
-│   └── analysis_report.md                     # 1~3단계 전략 검증 · 데이터 진단 · Colab 설계 리포트
+│   ├── analysis_report.md                     # 1~3단계 전략 검증 · 데이터 진단 · Colab 설계 리포트
+│   └── HANDOFF.md                             # 전체 운영·연구 체계 정리 & 다음 세션 인수인계 문서
 ├── data/
 │   ├── kr_fundamentals_pit.jsonl.gz           # 한국 상장사 374개사 공개 DART 시점고정 재무·배당 (FY2018~2024 + FY2025 실제 DPS, ~686KB)
 │   ├── kr_treasury_10y_annual.csv             # 한국 국고채 10년물 연평균 금리 (2013~2025, 한국은행 ECOS)
@@ -42,6 +43,22 @@ dividend-backtest/
     ├── colab_dividend_cashflow_sim.ipynb      # 10년 배당 현금흐름 · ISA/연금 절세 · 종합과세 경보 시뮬레이터
     └── colab_portfolio_stress_test.ipynb      # 6대 위기 스트레스 테스트 · 상관관계 히트맵 · 폭락장 매뉴얼
 ```
+
+---
+
+## 전체 배당성장주 운용·검토 체계 요약 (자동 트래커 vs Colab 도구)
+
+일상적인 공시·실적·판정 자동화는 비공개 운영 트래커(`dividnd-stock-tracker`)가 담당하고, 본 저장소(`dividend-backtest`)는 **전략 검증 및 실전 의사결정 5페이지 PDF 리포트**를 제공하는 역할 분담 구조입니다. *(상세 인수인계 및 점검표는 [`docs/HANDOFF.md`](docs/HANDOFF.md) 참조)*
+
+| 구분 | 담당 도구 | 검토 내용 & 받는 리포트 | 실행 주기 |
+|---|---|---|---|
+| **자동 공시·실적·판정** | 비공개 트래커 (`track.yml`, `monthly-screener.yml`, `watchdog.yml`) | 일간 주요 공시 + 실적 추적 HTML(+IR 발췌), 주간 요약(가격·손익·내부자), 월간 전체 판정·리밸런싱·시트 갱신·일정 달력·**11p 통합 스크리너 PDF**, 분기·연간 점검 HTML, 무소식 감지 | **자동** (화~금 · 월 · 매월 1일 · 분기/연간) |
+| **1번 · 현금흐름/절세** | `colab_dividend_cashflow_sim.ipynb` | 10년 자산·세후 월배당 몬테카를로(5,000회), 월 적립금별 목표 도달 연도, ISA/연금 절세액, 종소세(2천만) 경보 → **5p A4 PDF** | 반기 1회 · 자산/적립 변경 시 |
+| **2번 · 위기 스트레스** | `colab_portfolio_stress_test.ipynb` | 6대 위기 방어력·배당 유지율, 10년 실측 주간 상관관계 히트맵(520주), -35% 폭락장 회복 비교, 3단계 행동 매뉴얼 → **5p A4 PDF** | 반기 1회 · 비중 큰 변동 시 |
+| **3번 · 우선주 판독** | `colab_preferred_tracker.ipynb` | 우선주 vs 보통주 10년 총수익·괴리율 백분위·신규 매수 판독(보유주 스포트라이트) → **5p A4 PDF** | 분기 1회 · 우선주 매수 전 |
+| **4번 · 연간 스크리너** | `colab_screener.ipynb` | 코스피·코스닥 전 종목 스크리닝 · 보유주 정기 검진 · 매수 배분 → **A4 PDF** | 연 1회 (4~5월) |
+| **5번 · 정성 AI 감시** | `colab_qualitative_ai_monitor.ipynb` | OpenDART 원문 + IR PDF 기반 신호 ⑤⑥⑦ 정성 감사 *(API 402 시 원문 번들 자동 저장)* → **A4 PDF / 번들 `.md`** | 분기 1회 · 대형 공시 시 |
+| **전략 백테스트 연구** | `colab_backtest` · `alpha_lab` · `pit_builder` · `final_portfolio` · `blind_oos` | 팩터 검증, 시점고정(PIT) DB, A+B+C 통합 백테스트, 블라인드 OOS 검증 | 전략 기준 변경 시 |
 
 ---
 
