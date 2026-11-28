@@ -10,6 +10,8 @@ Google Colab에서 한국 배당성장주 전략을 **백테스트(장기보유 
 | `notebooks/colab_pit_builder.ipynb` | **전 종목(~2,300개사) 풀 유니버스 PIT DB 빌더** *(Drive 자동 저장 · 2일 이어받기 -> `colab_alpha_lab` 자동 연동)* | **무료 `DART_API_KEY`** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_pit_builder.ipynb) |
 | `notebooks/colab_final_portfolio_backtest.ipynb` | **최종 통합 백테스트 (버그 4종 보정 · 진성주주환원 · 상대70% 게이트 · 금융≤50% · A+B+C 적립식 · 9.7년 PIT + 14.7년 추정)** | **불필요** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_final_portfolio_backtest.ipynb) |
 | `notebooks/colab_blind_oos_lab.ipynb` | **진성 블라인드(백지상태) OOS 검증실 (탐색 17~22 동결 -> 봉인 22~26 단독 채점 · 사후편향 거품 측정 · 종목수/리밸월 스트레스)** | **불필요** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_blind_oos_lab.ipynb) |
+| `notebooks/colab_qualitative_ai_monitor.ipynb` | **OpenDART 공시 원문 + Drive IR PDF × Gemini AI 정성 리스크 감시기 (신호 ⑤ 배당사유 · ⑥ 환원정책 · ⑦ 자본배분)** | **무료 `DART` + `GEMINI`** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_qualitative_ai_monitor.ipynb) |
+| `notebooks/colab_preferred_tracker.ipynb` | **우선주 vs 보통주 10년 총수익 · 괴리율 백분위 · 신규 매수 판독기 (보유 우선주 자동 태그 · 재검토선 감시)** | **불필요** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/khs0221/Common_Everything/blob/feat/dividend-backtest/dividend-backtest/notebooks/colab_preferred_tracker.ipynb) |
 
 > *(참고: PR이 기본 브랜치로 머지된 뒤에는 위 Colab 배지 링크의 브랜치명만 기본 브랜치로 바꾸면 됩니다.)*
 
@@ -32,7 +34,9 @@ dividend-backtest/
     ├── colab_alpha_lab.ipynb                  # 알파 팩터 연구실(Walk-Forward 전진검증 · 몬테카를로 · PIT 시총 필터)
     ├── colab_pit_builder.ipynb                # 코스피·코스닥 전체 보통주(~2,300개사) 풀 유니버스 PIT DB 빌더
     ├── colab_final_portfolio_backtest.ipynb   # 최종 통합 백테스트 (9.7년 클린 PIT + A+B+C 적립식 + 14.7년 장기 추정)
-    └── colab_blind_oos_lab.ipynb              # 진성 블라인드(백지상태) OOS 검증실 (탐색/봉인 분리 · 사후편향 측정)
+    ├── colab_blind_oos_lab.ipynb              # 진성 블라인드(백지상태) OOS 검증실 (탐색/봉인 분리 · 사후편향 측정)
+    ├── colab_qualitative_ai_monitor.ipynb     # OpenDART 공시 원문 + IR PDF × Gemini AI 정성 리스크 감시기 (⑤⑥⑦)
+    └── colab_preferred_tracker.ipynb          # 우선주 vs 보통주 10년 총수익 · 괴리율 백분위 · 신규 매수 판독기
 ```
 
 ---
